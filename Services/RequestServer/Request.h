@@ -361,6 +361,13 @@ private:
     ByteString m_method;
 
     UnixDateTime m_request_start_time { UnixDateTime::now() };
+    // The offsets of the timing info count from when this request started. curl measures its own from the start of
+    // the transfer, which only comes after the request's DNS lookup, which RequestServer makes itself, and after its
+    // cookies are retrieved.
+    MonotonicTime m_started_at { MonotonicTime::now() };
+    Optional<MonotonicTime> m_dns_lookup_started_at;
+    Optional<MonotonicTime> m_dns_lookup_ended_at;
+    Optional<MonotonicTime> m_transfer_started_at;
     MonotonicTime m_last_activity_time { MonotonicTime::now() };
     NonnullRefPtr<HTTP::HeaderList> m_request_headers;
     ByteBuffer m_request_body;

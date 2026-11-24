@@ -1364,16 +1364,20 @@ void Request::handle_dns_lookup_state()
     auto const& dns_info = DNSInfo::the();
 
     mark_lifecycle_event(this, &WireStats::dns_started_at);
+    m_dns_lookup_started_at = MonotonicTime::now();
+    m_dns_lookup_ended_at.clear();
 
     m_resolver->dns.lookup(host, DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA }, { .validate_dnssec_locally = dns_info.validate_dnssec_locally })
         ->when_rejected(weak_callback(*this, [host](auto& self, auto const& error) {
             mark_lifecycle_event(&self, &WireStats::dns_completed_at);
+            self.m_dns_lookup_ended_at = MonotonicTime::now();
             dbgln("Request::handle_dns_lookup_state: DNS lookup failed for '{}': {}", host, error);
             self.m_network_error = Requests::NetworkError::UnableToResolveHost;
             self.transition_to_state(State::Error);
         }))
         .when_resolved(weak_callback(*this, [host](auto& self, NonnullRefPtr<DNS::LookupResult const> dns_result) {
             mark_lifecycle_event(&self, &WireStats::dns_completed_at);
+            self.m_dns_lookup_ended_at = MonotonicTime::now();
             if (dns_result->is_empty() || !dns_result->has_cached_addresses()) {
                 dbgln("Request::handle_dns_lookup_state: DNS lookup failed for '{}'", host);
                 self.m_network_error = Requests::NetworkError::UnableToResolveHost;
@@ -1515,6 +1519,7 @@ void Request::handle_connect_state()
     set_curl_resolve_list(m_dns_result ? build_curl_resolve_list(*m_dns_result, m_url.serialized_host(), m_url.port_or_default()) : Optional<ByteString> {});
 
     mark_lifecycle_event(this, &WireStats::curl_added_at);
+    m_transfer_started_at = MonotonicTime::now();
     auto result = curl_multi_add_handle(m_curl_multi_handle, m_curl_easy_handle);
     VERIFY(result == CURLM_OK);
     m_curl_easy_handle_is_in_multi = true;
@@ -1715,6 +1720,7 @@ void Request::handle_fetch_state()
     }
 
     mark_lifecycle_event(this, &WireStats::curl_added_at);
+    m_transfer_started_at = MonotonicTime::now();
     auto result = curl_multi_add_handle(m_curl_multi_handle, m_curl_easy_handle);
     VERIFY(result == CURLM_OK);
     m_curl_easy_handle_is_in_multi = true;
@@ -2562,15 +2568,26 @@ Requests::RequestTimingInfo Request::acquire_timing_info() const
         return time_value;
     };
 
-    // Every value is measured from the start of this transfer, so they are offsets along one timeline rather than
-    // durations to add up.
-    auto queue_end_time = get_timing_info(CURLINFO_QUEUE_TIME_T);
-    auto domain_lookup_end_time = get_timing_info(CURLINFO_NAMELOOKUP_TIME_T);
-    auto connect_end_time = get_timing_info(CURLINFO_CONNECT_TIME_T);
-    auto secure_connect_end_time = get_timing_info(CURLINFO_APPCONNECT_TIME_T);
-    auto request_start_time = get_timing_info(CURLINFO_PRETRANSFER_TIME_T);
-    auto response_start_time = get_timing_info(CURLINFO_STARTTRANSFER_TIME_T);
-    auto response_end_time = get_timing_info(CURLINFO_TOTAL_TIME_T);
+    // Every value is an offset from the start of this request, along one timeline, rather than a duration to add up.
+    auto offset_of = [this](MonotonicTime time) -> i64 {
+        return max<i64>(0, (time - m_started_at).to_microseconds());
+    };
+
+    // curl measures from the start of the transfer, which comes after this request's own DNS lookup and the retrieval
+    // of its cookies, so its values are moved along by that much.
+    auto transfer_start_time = m_transfer_started_at.has_value() ? offset_of(*m_transfer_started_at) : 0;
+    auto get_transfer_timing_info = [&](auto option) {
+        return transfer_start_time + get_timing_info(option);
+    };
+
+    auto queue_end_time = get_transfer_timing_info(CURLINFO_QUEUE_TIME_T);
+    // NB: curl looks up nothing itself, since the request pins its host to the addresses that RequestServer found.
+    auto curl_domain_lookup_end_time = get_transfer_timing_info(CURLINFO_NAMELOOKUP_TIME_T);
+    auto connect_end_time = get_transfer_timing_info(CURLINFO_CONNECT_TIME_T);
+    auto raw_secure_connect_end_time = get_timing_info(CURLINFO_APPCONNECT_TIME_T);
+    auto request_start_time = get_transfer_timing_info(CURLINFO_PRETRANSFER_TIME_T);
+    auto response_start_time = get_transfer_timing_info(CURLINFO_STARTTRANSFER_TIME_T);
+    auto response_end_time = get_transfer_timing_info(CURLINFO_TOTAL_TIME_T);
     auto encoded_body_size = get_timing_info(CURLINFO_SIZE_DOWNLOAD_T);
 
     long http_version = 0;
@@ -2597,12 +2614,16 @@ Requests::RequestTimingInfo Request::acquire_timing_info() const
     }
 
     // APPCONNECT is 0 without a TLS handshake, in which case the connection is established once TCP connects.
-    bool used_tls = secure_connect_end_time != 0;
+    bool used_tls = raw_secure_connect_end_time != 0;
+    auto secure_connect_end_time = transfer_start_time + raw_secure_connect_end_time;
+
+    auto domain_lookup_start_time = m_dns_lookup_started_at.has_value() ? offset_of(*m_dns_lookup_started_at) : queue_end_time;
+    auto domain_lookup_end_time = m_dns_lookup_ended_at.has_value() ? offset_of(*m_dns_lookup_ended_at) : curl_domain_lookup_end_time;
 
     return Requests::RequestTimingInfo {
-        .domain_lookup_start_microseconds = queue_end_time,
+        .domain_lookup_start_microseconds = domain_lookup_start_time,
         .domain_lookup_end_microseconds = domain_lookup_end_time,
-        .connect_start_microseconds = domain_lookup_end_time,
+        .connect_start_microseconds = curl_domain_lookup_end_time,
         .connect_end_microseconds = used_tls ? secure_connect_end_time : connect_end_time,
         .secure_connect_start_microseconds = used_tls ? connect_end_time : 0,
         .request_start_microseconds = request_start_time,

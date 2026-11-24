@@ -5,11 +5,13 @@
  */
 
 #include <AK/ByteString.h>
+#include <AK/ScopeGuard.h>
 #include <AK/Time.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Socket.h>
 #include <LibCore/System.h>
 #include <LibCore/TCPServer.h>
+#include <LibCore/Timer.h>
 #include <LibHTTP/Cache/DiskCache.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
@@ -19,6 +21,7 @@
 #include <LibURL/Parser.h>
 #include <RequestServer/CURL.h>
 #include <RequestServer/ConnectionFromClient.h>
+#include <RequestServer/Resolver.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
 
 namespace {
@@ -45,9 +48,9 @@ public:
         };
     }
 
-    URL::URL url_for_path(StringView path) const
+    URL::URL url_for_path(StringView path, StringView host = "127.0.0.1"sv) const
     {
-        return URL::Parser::basic_parse(ByteString::formatted("http://127.0.0.1:{}{}", *m_server->local_port(), path)).release_value();
+        return URL::Parser::basic_parse(ByteString::formatted("http://{}:{}{}", host, *m_server->local_port(), path)).release_value();
     }
 
 private:
@@ -203,7 +206,7 @@ TEST_CASE(request_timing_info_rejects_invalid_alpn_version)
     EXPECT(decoder.decode<Requests::RequestTimingInfo>().is_error());
 }
 
-// Every timing phase is an offset from the start of the transfer, so they must be ordered and none may exceed the
+// Every timing phase is an offset from the start of the request, so they must be ordered and none may exceed the
 // wall-clock time the request took.
 TEST_CASE(timing_phases_are_ordered_and_bounded_by_the_request_duration)
 {
@@ -220,7 +223,7 @@ TEST_CASE(timing_phases_are_ordered_and_bounded_by_the_request_duration)
     auto const& timing = finished->timing_info;
     EXPECT(timing.domain_lookup_start_microseconds >= 0);
     EXPECT(timing.domain_lookup_end_microseconds >= timing.domain_lookup_start_microseconds);
-    EXPECT_EQ(timing.connect_start_microseconds, timing.domain_lookup_end_microseconds);
+    EXPECT(timing.connect_start_microseconds >= timing.domain_lookup_end_microseconds);
     EXPECT(timing.connect_end_microseconds >= timing.connect_start_microseconds);
     EXPECT(timing.request_start_microseconds >= timing.connect_end_microseconds);
     EXPECT(timing.response_start_microseconds >= timing.request_start_microseconds);
@@ -245,4 +248,42 @@ TEST_CASE(plain_http_has_no_secure_connection_start)
         return;
 
     EXPECT_EQ(finished->timing_info.secure_connect_start_microseconds, 0);
+}
+
+// RequestServer looks the host up itself before curl's transfer starts, so the lookup has to be part of the timing
+// info, rather than leaving the DNS phase empty and the connection seeming to start as soon as the request does.
+TEST_CASE(timing_info_includes_the_dns_lookup)
+{
+    static constexpr auto lookup_delay = AK::Duration::from_milliseconds(200);
+
+    // Answer the system resolver's lookups for the host only after a while, as a DNS server far away would.
+    auto resolver = RequestServer::Resolver::default_resolver();
+    resolver->dns.set_remote_system_resolver([](ByteString const&, Core::Socket::AddressFamily family, Function<void(DNS::Resolver::SystemResolution)> on_resolved) {
+        auto timer = Core::Timer::create_single_shot(lookup_delay, {});
+        timer->on_timeout = [timer, family, on_resolved = move(on_resolved)] mutable {
+            Vector<Variant<IPv4Address, IPv6Address>> addresses;
+            if (family == Core::Socket::AddressFamily::IPv4Only)
+                addresses.append(IPv4Address { 127, 0, 0, 1 });
+            on_resolved(move(addresses));
+            timer->on_timeout = {};
+        };
+        timer->start();
+    });
+    ScopeGuard restore_system_resolver = [&] { resolver->dns.set_remote_system_resolver({}); };
+
+    TestServer server;
+    TestConnection connection { server };
+    HTTPServer http_server;
+
+    auto finished = connection.fetch(1, http_server.url_for_path("/resource"sv, "far-away-dns.test"sv), AK::Duration::from_seconds(10));
+    EXPECT(finished.has_value());
+    if (!finished.has_value())
+        return;
+    EXPECT(!finished->network_error.has_value());
+
+    auto const& timing = finished->timing_info;
+    EXPECT(timing.domain_lookup_end_microseconds - timing.domain_lookup_start_microseconds >= lookup_delay.to_microseconds());
+    EXPECT(timing.connect_start_microseconds >= timing.domain_lookup_end_microseconds);
+    EXPECT(timing.request_start_microseconds >= lookup_delay.to_microseconds());
+    EXPECT(timing.response_end_microseconds <= finished->elapsed.to_microseconds());
 }

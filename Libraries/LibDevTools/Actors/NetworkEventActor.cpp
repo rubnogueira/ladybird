@@ -324,6 +324,9 @@ void NetworkEventActor::get_response_content(Message const& message)
 void NetworkEventActor::get_event_timings(Message const& message)
 {
     // Convert microseconds to milliseconds for HAR format
+    // The request is blocked for as long as it waits to reach the network, other than for its DNS lookup: for the cache,
+    // for its cookies, or for a connection.
+    auto blocked_time = (m_timing_info.domain_lookup_start_microseconds + max<i64>(0, m_timing_info.connect_start_microseconds - m_timing_info.domain_lookup_end_microseconds)) / 1000;
     auto dns_time = (m_timing_info.domain_lookup_end_microseconds - m_timing_info.domain_lookup_start_microseconds) / 1000;
     auto connect_time = (m_timing_info.connect_end_microseconds - m_timing_info.connect_start_microseconds) / 1000;
     auto ssl_time = m_timing_info.secure_connect_start_microseconds > 0
@@ -335,7 +338,7 @@ void NetworkEventActor::get_event_timings(Message const& message)
     auto receive_time = (m_timing_info.response_end_microseconds - m_timing_info.response_start_microseconds) / 1000;
 
     JsonObject timings;
-    timings.set("blocked"sv, 0);
+    timings.set("blocked"sv, blocked_time);
     timings.set("dns"sv, dns_time);
     timings.set("connect"sv, connect_time);
     timings.set("ssl"sv, ssl_time);
