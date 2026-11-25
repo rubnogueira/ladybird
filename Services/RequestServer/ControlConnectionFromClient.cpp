@@ -194,6 +194,7 @@ void ControlConnectionFromClient::set_dns_server(ByteString host_or_address, u16
     dns_info.validate_dnssec_locally = validate_dnssec_locally;
 
     Resolver::reset_connections();
+    Resolver::connect_to_dns_server_ahead();
 }
 
 void ControlConnectionFromClient::set_use_system_dns()

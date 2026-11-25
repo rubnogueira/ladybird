@@ -175,6 +175,24 @@ void Resolver::resolve_system_names_remotely()
     }
 }
 
+// NB: The connection to a configured DNS server is otherwise made by the first lookup, and in that lookup: over TLS, the
+//     handshake takes a few round trips, during which nothing else in this process moves. Each site has a RequestServer
+//     of its own, so the first request of every site paid for it. Made as soon as the server is known, which is when
+//     this process starts up, the connection is ready before a request needs it, and a spare RequestServer has it ready
+//     before it is assigned a site.
+void Resolver::connect_to_dns_server_ahead()
+{
+    if (!DNSInfo::the().uses_configured_dns_server())
+        return;
+
+    Core::deferred_invoke([] {
+        if (!DNSInfo::the().uses_configured_dns_server())
+            return;
+        // The private resolver connects when a private client first needs it.
+        (void)default_resolver()->dns.when_socket_ready();
+    });
+}
+
 void Resolver::reset_connections()
 {
     for (auto* weak_resolver : { &g_default_resolver, &g_private_resolver }) {

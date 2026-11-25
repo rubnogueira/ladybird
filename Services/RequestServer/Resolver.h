@@ -44,6 +44,9 @@ struct Resolver
 
     static void reset_connections();
 
+    // Connects to the configured DNS server ahead of the first lookup, see the definition.
+    static void connect_to_dns_server_ahead();
+
     // From now on, every resolver sends the names that it looks up with the system resolver to the process that
     // launched RequestServer: RequestServer may not read the files the system resolver needs, like /etc/resolv.conf.
     static void resolve_system_names_remotely();
