@@ -2722,6 +2722,9 @@ Requests::RequestTimingInfo Request::acquire_timing_info() const
     auto raw_secure_connect_end_time = get_timing_info(CURLINFO_APPCONNECT_TIME_T);
     auto request_start_time = get_transfer_timing_info(CURLINFO_PRETRANSFER_TIME_T);
     auto response_start_time = get_transfer_timing_info(CURLINFO_STARTTRANSFER_TIME_T);
+    // NB: curl leaves POSTTRANSFER at 0 if it never finished sending the request, and a server may start its response
+    //     before it has read all of a request's body.
+    auto request_end_time = clamp(get_transfer_timing_info(CURLINFO_POSTTRANSFER_TIME_T), request_start_time, max(request_start_time, response_start_time));
     auto response_end_time = get_transfer_timing_info(CURLINFO_TOTAL_TIME_T);
     auto encoded_body_size = get_timing_info(CURLINFO_SIZE_DOWNLOAD_T);
 
@@ -2762,6 +2765,7 @@ Requests::RequestTimingInfo Request::acquire_timing_info() const
         .connect_end_microseconds = used_tls ? secure_connect_end_time : connect_end_time,
         .secure_connect_start_microseconds = used_tls ? connect_end_time : 0,
         .request_start_microseconds = request_start_time,
+        .request_end_microseconds = request_end_time,
         .response_start_microseconds = response_start_time,
         .response_end_microseconds = response_end_time,
         .encoded_body_size = encoded_body_size,

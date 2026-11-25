@@ -332,9 +332,8 @@ void NetworkEventActor::get_event_timings(Message const& message)
     auto ssl_time = m_timing_info.secure_connect_start_microseconds > 0
         ? (m_timing_info.connect_end_microseconds - m_timing_info.secure_connect_start_microseconds) / 1000
         : 0;
-    auto send_time = (m_timing_info.response_start_microseconds - m_timing_info.request_start_microseconds) / 1000;
-    // FIXME: Calculate actual time waiting for server response (TTFB)
-    auto wait_time = 0;
+    auto send_time = (m_timing_info.request_end_microseconds - m_timing_info.request_start_microseconds) / 1000;
+    auto wait_time = (m_timing_info.response_start_microseconds - m_timing_info.request_end_microseconds) / 1000;
     auto receive_time = (m_timing_info.response_end_microseconds - m_timing_info.response_start_microseconds) / 1000;
 
     JsonObject timings;

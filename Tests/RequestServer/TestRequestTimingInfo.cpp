@@ -235,7 +235,8 @@ TEST_CASE(timing_phases_are_ordered_and_bounded_by_the_request_duration)
     EXPECT(timing.connect_start_microseconds >= timing.domain_lookup_end_microseconds);
     EXPECT(timing.connect_end_microseconds >= timing.connect_start_microseconds);
     EXPECT(timing.request_start_microseconds >= timing.connect_end_microseconds);
-    EXPECT(timing.response_start_microseconds >= timing.request_start_microseconds);
+    EXPECT(timing.request_end_microseconds >= timing.request_start_microseconds);
+    EXPECT(timing.response_start_microseconds >= timing.request_end_microseconds);
     EXPECT(timing.response_end_microseconds >= timing.response_start_microseconds);
     EXPECT(timing.response_end_microseconds > 0);
     EXPECT(timing.response_end_microseconds <= finished->elapsed.to_microseconds());

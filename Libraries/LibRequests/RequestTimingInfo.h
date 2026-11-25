@@ -18,6 +18,8 @@ struct RequestTimingInfo {
     i64 connect_end_microseconds { 0 };
     i64 secure_connect_start_microseconds { 0 };
     i64 request_start_microseconds { 0 };
+    // When the whole request has been sent, so that the time until the response starts is the server's.
+    i64 request_end_microseconds { 0 };
     i64 response_start_microseconds { 0 };
     i64 response_end_microseconds { 0 };
     i64 encoded_body_size { 0 };

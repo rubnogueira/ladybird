@@ -19,6 +19,7 @@ ErrorOr<void> encode(Encoder& encoder, Requests::RequestTimingInfo const& timing
     TRY(encoder.encode(timing_info.connect_end_microseconds));
     TRY(encoder.encode(timing_info.secure_connect_start_microseconds));
     TRY(encoder.encode(timing_info.request_start_microseconds));
+    TRY(encoder.encode(timing_info.request_end_microseconds));
     TRY(encoder.encode(timing_info.response_start_microseconds));
     TRY(encoder.encode(timing_info.response_end_microseconds));
     TRY(encoder.encode(timing_info.encoded_body_size));
@@ -35,6 +36,7 @@ ErrorOr<Requests::RequestTimingInfo> decode(Decoder& decoder)
     auto connect_end_microseconds = TRY(decoder.decode<i64>());
     auto secure_connect_start_microseconds = TRY(decoder.decode<i64>());
     auto request_start_microseconds = TRY(decoder.decode<i64>());
+    auto request_end_microseconds = TRY(decoder.decode<i64>());
     auto response_start_microseconds = TRY(decoder.decode<i64>());
     auto response_end_microseconds = TRY(decoder.decode<i64>());
     auto encoded_body_size = TRY(decoder.decode<i64>());
@@ -55,6 +57,7 @@ ErrorOr<Requests::RequestTimingInfo> decode(Decoder& decoder)
         .connect_end_microseconds = connect_end_microseconds,
         .secure_connect_start_microseconds = secure_connect_start_microseconds,
         .request_start_microseconds = request_start_microseconds,
+        .request_end_microseconds = request_end_microseconds,
         .response_start_microseconds = response_start_microseconds,
         .response_end_microseconds = response_end_microseconds,
         .encoded_body_size = encoded_body_size,

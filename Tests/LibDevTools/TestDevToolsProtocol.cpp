@@ -1510,13 +1510,14 @@ public:
         on_network_response_body_received(100, move(response_body));
 
         Requests::RequestTimingInfo timing_info;
-        timing_info.request_start_microseconds = 1000;
         timing_info.domain_lookup_start_microseconds = 1000;
         timing_info.domain_lookup_end_microseconds = 2000;
-        timing_info.connect_start_microseconds = 2000;
-        timing_info.connect_end_microseconds = 4000;
-        timing_info.response_start_microseconds = 5000;
-        timing_info.response_end_microseconds = 9000;
+        timing_info.connect_start_microseconds = 3000;
+        timing_info.connect_end_microseconds = 5000;
+        timing_info.request_start_microseconds = 5000;
+        timing_info.request_end_microseconds = 6000;
+        timing_info.response_start_microseconds = 9000;
+        timing_info.response_end_microseconds = 13000;
         on_network_request_finished({ .request_id = 100, .body_size = 11, .timing_info = timing_info, .network_error = {} });
     }
 
@@ -5710,6 +5711,28 @@ TEST_CASE(network_event_reports_request_metadata)
     auto completion_update = read_resource(client, "network-event"sv, "resources-updated-array"sv);
     EXPECT_EQ(completion_update.get_integer<u64>("browsingContextID"sv).value(), 42u);
     EXPECT_EQ(completion_update.get_integer<u64>("innerWindowId"sv).value(), inner_window_id);
+}
+
+TEST_CASE(network_event_reports_event_timings)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    (void)get_frame_target(client, actor_from(get_tab(client), "actor"sv));
+    session->delegate.emit_network_lifecycle();
+    auto network_actor = read_resource(client, "network-event"sv).get_string("actor"sv).release_value();
+    (void)read_resource(client, "network-event"sv, "resources-updated-array"sv);
+    (void)read_resource(client, "network-event"sv, "resources-updated-array"sv);
+
+    auto response = client.request(network_actor, "getEventTimings"sv);
+    auto timings = response.get_object("timings"sv).release_value();
+    EXPECT_EQ(timings.get_integer<i64>("blocked"sv).value(), 2);
+    EXPECT_EQ(timings.get_integer<i64>("dns"sv).value(), 1);
+    EXPECT_EQ(timings.get_integer<i64>("connect"sv).value(), 2);
+    EXPECT_EQ(timings.get_integer<i64>("send"sv).value(), 1);
+    EXPECT_EQ(timings.get_integer<i64>("wait"sv).value(), 3);
+    EXPECT_EQ(timings.get_integer<i64>("receive"sv).value(), 4);
 }
 
 TEST_CASE(network_event_reports_non_utf8_response_headers)
