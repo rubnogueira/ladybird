@@ -58,7 +58,7 @@ struct TestServer {
     {
         auto message = make<Messages::RequestServer::StartRequest>(
             request_id, ByteString { "GET" }, move(url), Vector<HTTP::Header> {}, ByteBuffer {},
-            HTTP::CacheMode::NoStore, Optional<HTTP::NetworkIsolationKey> {}, HTTP::Cookie::IncludeCredentials::No, false, Optional<u32> {}, false, originating_page_id, HTTP::Cookie::SameSiteContext {});
+            HTTP::CacheMode::NoStore, Optional<HTTP::NetworkIsolationKey> {}, HTTP::Cookie::IncludeCredentials::No, false, Optional<u32> {}, false, originating_page_id, HTTP::Cookie::SameSiteContext {}, AK::Duration::from_nanoseconds(MonotonicTime::now().nanoseconds()));
         VERIFY(!MUST(static_cast<RequestServerEndpoint::Stub&>(*connection).handle(move(message))));
     }
 

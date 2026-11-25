@@ -107,6 +107,10 @@ public:
     static Vector<Requests::NetworkUsage> take_network_usage();
     static void add_network_usage(Requests::NetworkUsage const&);
     void set_performance_origin(int client_id, u64 page_id);
+
+    // When the client made the request, on the monotonic clock that all processes share, which its timing info counts
+    // from. The request may have waited for this process to start up, or to read its messages, until then.
+    void set_requested_at(AK::Duration monotonic_time);
     void sample_network_usage();
 
     u64 request_id() const { return m_request_id; }

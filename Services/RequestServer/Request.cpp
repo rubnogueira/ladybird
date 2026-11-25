@@ -2683,6 +2683,16 @@ void Request::add_network_usage(Requests::NetworkUsage const& usage)
     total.upload_bytes = saturating_add(total.upload_bytes, usage.upload_bytes);
 }
 
+void Request::set_requested_at(AK::Duration monotonic_time)
+{
+    // NB: The client's word only moves the start of its own request's timing info, and not by more than a minute.
+    static constexpr auto maximum_wait = AK::Duration::from_seconds(60);
+    auto now = MonotonicTime::now();
+    auto waited = AK::Duration::from_nanoseconds(now.nanoseconds()) - monotonic_time;
+    waited = clamp(waited, AK::Duration::zero(), maximum_wait);
+    m_started_at = min(m_started_at, now - waited);
+}
+
 void Request::set_performance_origin(int client_id, u64 page_id)
 {
     m_performance_origin = { client_id, page_id, 0, 0 };

@@ -116,6 +116,12 @@ struct FinishedRequest {
     AK::Duration elapsed;
 };
 
+// How a client tells RequestServer when it made a request.
+static AK::Duration on_the_monotonic_clock(MonotonicTime time)
+{
+    return AK::Duration::from_nanoseconds(time.nanoseconds());
+}
+
 class TestConnection {
 public:
     explicit TestConnection(TestServer& server)
@@ -140,12 +146,12 @@ public:
             m_connection->shutdown();
     }
 
-    Optional<FinishedRequest> fetch(u64 request_id, URL::URL url, AK::Duration budget)
+    Optional<FinishedRequest> fetch(u64 request_id, URL::URL url, AK::Duration budget, Optional<MonotonicTime> requested_at = {})
     {
         auto started_at = MonotonicTime::now();
         m_started_at.set(request_id, started_at);
 
-        auto message = make<Messages::RequestServer::StartRequest>(request_id, ByteString { "GET" }, move(url), Vector<HTTP::Header> {}, ByteBuffer {}, HTTP::CacheMode::Default, Optional<HTTP::NetworkIsolationKey> {}, HTTP::Cookie::IncludeCredentials::No, false, Optional<u32> {}, false, 0, HTTP::Cookie::SameSiteContext {});
+        auto message = make<Messages::RequestServer::StartRequest>(request_id, ByteString { "GET" }, move(url), Vector<HTTP::Header> {}, ByteBuffer {}, HTTP::CacheMode::Default, Optional<HTTP::NetworkIsolationKey> {}, HTTP::Cookie::IncludeCredentials::No, false, Optional<u32> {}, false, 0, HTTP::Cookie::SameSiteContext {}, on_the_monotonic_clock(requested_at.value_or(started_at)));
         auto response = MUST(static_cast<RequestServerEndpoint::Stub&>(*m_connection).handle(move(message)));
         VERIFY(!response);
 
@@ -315,4 +321,26 @@ TEST_CASE(a_name_that_resolves_only_to_the_unspecified_address_fails_right_away)
         return;
     EXPECT(finished->network_error == Requests::NetworkError::UnableToResolveHost);
     EXPECT(finished->elapsed < AK::Duration::from_seconds(1));
+}
+
+TEST_CASE(timing_info_counts_from_when_the_client_made_the_request)
+{
+    // A request waits in its connection while RequestServer starts up, as one does that a navigation to a new site makes
+    // of the site's RequestServer as soon as the UI process launches it.
+    static constexpr auto wait_before_read = AK::Duration::from_milliseconds(300);
+
+    TestServer server;
+    TestConnection connection { server };
+    HTTPServer http_server;
+
+    auto finished = connection.fetch(1, http_server.url_for_path("/resource"sv), AK::Duration::from_seconds(10), MonotonicTime::now() - wait_before_read);
+    EXPECT(finished.has_value());
+    if (!finished.has_value())
+        return;
+    EXPECT(!finished->network_error.has_value());
+
+    auto const& timing = finished->timing_info;
+    EXPECT(timing.domain_lookup_start_microseconds >= wait_before_read.to_microseconds());
+    EXPECT(timing.request_start_microseconds >= timing.domain_lookup_start_microseconds);
+    EXPECT(timing.response_end_microseconds >= timing.request_start_microseconds);
 }
