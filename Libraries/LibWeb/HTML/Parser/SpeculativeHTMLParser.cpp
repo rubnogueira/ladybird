@@ -28,6 +28,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
 #include <LibWeb/HTMLTokenizerRustFFI.h>
+#include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWebCommon/Fetch/Infrastructure/HTTP/Statuses.h>
 #include <LibWebCommon/ReferrerPolicy/ReferrerPolicy.h>
 
@@ -273,6 +274,28 @@ void issue_speculative_module_script_fetch(DOM::Document& document, URL::URL con
 
 }
 
+// AD-HOC: The speculative HTML parser only fetches, but a preconnect or dns-prefetch link that the parser has yet to
+//         reach, such as behind a parser-blocking script, would make its connection or lookup only then. So act on it
+//         as the element would, and have the element leave out what was done already.
+void SpeculativeHTMLParser::process_connection_hint(RustFfiPreloadScannerAction action, Utf16View url_view)
+{
+    if (!ResourceLoader::is_initialized() || m_document->is_decoded_svg())
+        return;
+
+    auto url = m_base_url.complete_url(url_view.to_utf8_but_should_be_ported_to_utf16());
+    if (!url.has_value() || !url->scheme().is_one_of("http"sv, "https"sv))
+        return;
+
+    auto connection = action == RustFfiPreloadScannerAction::Preconnect ? DOM::Document::SpeculativeConnection::Connect : DOM::Document::SpeculativeConnection::Resolve;
+    if (!m_document->note_speculative_connection(url->origin(), connection))
+        return;
+
+    if (connection == DOM::Document::SpeculativeConnection::Connect)
+        ResourceLoader::the().preconnect(m_document, *url, m_document->fallback_base_url());
+    else
+        ResourceLoader::the().prefetch_dns(m_document, *url, m_document->fallback_base_url());
+}
+
 void SpeculativeHTMLParser::process_preload_scanner_entry(RustFfiPreloadScannerEntry const& entry)
 {
     auto url_view = utf16_view_from_ffi(entry.url);
@@ -287,6 +310,11 @@ void SpeculativeHTMLParser::process_preload_scanner_entry(RustFfiPreloadScannerE
         //    - A base element.
         if (auto parsed = m_document->encoding_parse_url(Utf16String::from_utf16(url_view)); parsed.has_value())
             m_base_url = parsed.release_value();
+        return;
+
+    case RustFfiPreloadScannerAction::Preconnect:
+    case RustFfiPreloadScannerAction::DnsPrefetch:
+        process_connection_hint(entry.action, url_view);
         return;
 
     case RustFfiPreloadScannerAction::Fetch:

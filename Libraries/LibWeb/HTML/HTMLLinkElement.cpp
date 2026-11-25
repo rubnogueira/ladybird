@@ -681,6 +681,9 @@ void HTMLLinkElement::fetch_and_process_linked_dns_prefetch_resource()
     // AD-HOC: Until then, keep an SVG image off the network as Fetch would.
     if (document().is_decoded_svg())
         return;
+    // NB: The speculative HTML parser may have looked the origin up already, see SpeculativeHTMLParser.
+    if (document().has_speculative_connection(url->origin(), DOM::Document::SpeculativeConnection::Resolve))
+        return;
     ResourceLoader::the().prefetch_dns(document(), url.value(), document().fallback_base_url());
 }
 
@@ -997,6 +1000,10 @@ void HTMLLinkElement::preconnect(LinkProcessingOptions const& options)
         return;
     // AD-HOC: Until then, keep an SVG image off the network as Fetch would.
     if (options.document && options.document->is_decoded_svg())
+        return;
+
+    // NB: The speculative HTML parser may have connected to the origin already, see SpeculativeHTMLParser.
+    if (options.document && options.document->has_speculative_connection(url->origin(), DOM::Document::SpeculativeConnection::Connect))
         return;
 
     auto source_url = options.document ? options.document->fallback_base_url() : options.environment->api_base_url();

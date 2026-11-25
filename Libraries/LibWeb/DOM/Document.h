@@ -1382,6 +1382,15 @@ public:
     bool has_speculative_fetch_url(URL::URL const& url) const { return m_list_of_speculative_fetch_urls.contains(url); }
     void add_speculative_fetch_url(URL::URL url) { m_list_of_speculative_fetch_urls.set(move(url)); }
 
+    // The origins that the speculative HTML parser connected to, or looked up, for the preconnect and dns-prefetch links
+    // that it found ahead of the parser. Each returns whether the origin was new.
+    enum class SpeculativeConnection : u8 {
+        Resolve,
+        Connect,
+    };
+    bool note_speculative_connection(URL::Origin const&, SpeculativeConnection);
+    bool has_speculative_connection(URL::Origin const&, SpeculativeConnection) const;
+
     void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, IntersectionObserver::IntersectionObserver&);
     bool has_intersection_observation_targets() const;
 
@@ -2392,6 +2401,7 @@ private:
 
     // https://html.spec.whatwg.org/multipage/parsing.html#list-of-speculative-fetch-urls
     HashTable<URL::URL> m_list_of_speculative_fetch_urls;
+    HashMap<ByteString, SpeculativeConnection> m_speculative_connections;
 
     GC::Ptr<CSS::VisualViewport> m_visual_viewport;
 

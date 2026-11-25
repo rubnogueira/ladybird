@@ -5089,6 +5089,23 @@ EventTarget* Document::get_parent(Event const& event)
 }
 
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#completely-loaded
+bool Document::note_speculative_connection(URL::Origin const& origin, SpeculativeConnection connection)
+{
+    if (has_speculative_connection(origin, connection))
+        return false;
+    m_speculative_connections.set(origin.serialize().to_byte_string(), connection);
+    return true;
+}
+
+// A connection serves what a lookup would have.
+bool Document::has_speculative_connection(URL::Origin const& origin, SpeculativeConnection connection) const
+{
+    auto existing = m_speculative_connections.get(origin.serialize().to_byte_string());
+    if (!existing.has_value())
+        return false;
+    return *existing == SpeculativeConnection::Connect || connection == SpeculativeConnection::Resolve;
+}
+
 bool Document::is_completely_loaded() const
 {
     return m_completely_loaded_time.has_value();

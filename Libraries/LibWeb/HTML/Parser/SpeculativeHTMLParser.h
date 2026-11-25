@@ -40,6 +40,7 @@ private:
     virtual void finalize() override;
 
     void process_preload_scanner_entry(RustFfiPreloadScannerEntry const&);
+    void process_connection_hint(RustFfiPreloadScannerAction, Utf16View);
 
     GC::Ref<DOM::Document> m_document;
     RustFfiPreloadScanner* m_scanner { nullptr };

@@ -27,6 +27,8 @@ pub enum RustFfiPreloadScannerAction {
     Fetch = 1,
     ModulePreload = 2,
     ModuleScript = 3,
+    Preconnect = 4,
+    DnsPrefetch = 5,
 }
 
 #[repr(C)]
@@ -444,6 +446,16 @@ fn process_link(attributes: &[Attribute], callback: &mut impl FnMut(&RustFfiPrel
             return true;
         };
         (RustFfiPreloadScannerAction::Fetch, destination)
+    } else if rel_contains_keyword(&rel, b"preconnect") {
+        (
+            RustFfiPreloadScannerAction::Preconnect,
+            RustFfiPreloadScannerDestination::None,
+        )
+    } else if rel_contains_keyword(&rel, b"dns-prefetch") {
+        (
+            RustFfiPreloadScannerAction::DnsPrefetch,
+            RustFfiPreloadScannerDestination::None,
+        )
     } else {
         return true;
     };
@@ -780,6 +792,35 @@ mod tests {
                     action: RustFfiPreloadScannerAction::Fetch,
                     url: "./font".to_string(),
                     destination: RustFfiPreloadScannerDestination::Font,
+                    cors_setting: RustFfiPreloadScannerCorsSetting::NoCors,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_connection_hints() {
+        let entries = collect(
+            r#"
+                <link rel="preconnect" href="https://cdn.example">
+                <link rel="DNS-Prefetch" href="//fonts.example">
+                <link rel="preconnect" href="">
+            "#,
+        );
+
+        assert_eq!(
+            entries,
+            vec![
+                ScannedEntry {
+                    action: RustFfiPreloadScannerAction::Preconnect,
+                    url: "https://cdn.example".to_string(),
+                    destination: RustFfiPreloadScannerDestination::None,
+                    cors_setting: RustFfiPreloadScannerCorsSetting::NoCors,
+                },
+                ScannedEntry {
+                    action: RustFfiPreloadScannerAction::DnsPrefetch,
+                    url: "//fonts.example".to_string(),
+                    destination: RustFfiPreloadScannerDestination::None,
                     cors_setting: RustFfiPreloadScannerCorsSetting::NoCors,
                 },
             ]
