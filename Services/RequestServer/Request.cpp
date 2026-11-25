@@ -1384,6 +1384,13 @@ void Request::handle_dns_lookup_state()
                 self.transition_to_state(State::Error);
                 return;
             }
+            // NB: Other browsers refuse to connect to the unspecified address too.
+            if (resolves_only_to_unspecified_addresses(*dns_result, host)) {
+                dbgln_if(REQUESTSERVER_DEBUG, "Request::handle_dns_lookup_state: '{}' resolves only to the unspecified address", host);
+                self.m_network_error = Requests::NetworkError::UnableToResolveHost;
+                self.transition_to_state(State::Error);
+                return;
+            }
             self.m_dns_result = move(dns_result);
             self.continue_after_dns_lookup();
         }));

@@ -5,8 +5,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/AllOf.h>
 #include <AK/Enumerate.h>
 #include <AK/Format.h>
+#include <AK/IPv4Address.h>
+#include <AK/IPv6Address.h>
 #include <RequestServer/AIA.h>
 #include <RequestServer/CURL.h>
 #include <RequestServer/CertificateExceptions.h>
@@ -171,6 +174,22 @@ ByteString build_curl_resolve_list(DNS::LookupResult const& dns_result, StringVi
 
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: Resolve list: {}", resolve_opt_builder.string_view());
     return resolve_opt_builder.to_byte_string();
+}
+
+bool resolves_only_to_unspecified_addresses(DNS::LookupResult const& dns_result, StringView host)
+{
+    auto unbracketed_host = host.starts_with('[') && host.ends_with(']') ? host.substring_view(1, host.length() - 2) : host;
+    if (IPv4Address::from_string(unbracketed_host).has_value() || IPv6Address::from_string(unbracketed_host).has_value())
+        return false;
+
+    auto addresses = dns_result.cached_addresses();
+    if (addresses.is_empty())
+        return false;
+    return all_of(addresses, [](auto const& address) {
+        return address.visit(
+            [](IPv4Address const& ipv4) { return ipv4.is_zero(); },
+            [](IPv6Address const& ipv6) { return ipv6.is_zero() || (ipv6.is_ipv4_mapped() && ipv6.ipv4_mapped_address()->is_zero()); });
+    });
 }
 
 Optional<ByteString> build_curl_connect_to_entry(DNS::LookupResult const& dns_result, StringView host, u16 port, u32 address_index)

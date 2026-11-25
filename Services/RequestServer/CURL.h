@@ -31,6 +31,11 @@ bool can_pin_host_in_curl_resolve_list(StringView host);
 
 ByteString build_curl_resolve_list(DNS::LookupResult const& dns_result, StringView host, u16 port);
 
+// Whether a lookup of the host found only the unspecified address (0.0.0.0 or ::), which is how DNS sinkholes, such as
+// ad blockers, block a name. A connection to it reaches this machine instead, and may only fail once it times out.
+// A host that is an IP address itself is not looked up, so it never counts.
+bool resolves_only_to_unspecified_addresses(DNS::LookupResult const& dns_result, StringView host);
+
 // A CURLOPT_CONNECT_TO entry pinning one request to a single address out of the resolved pool, so that several
 // requests to the same host can be spread across the addresses it resolved to instead of all piling onto whichever
 // one libcurl would pick. Empty when there is only one address, i.e. nothing to spread over.

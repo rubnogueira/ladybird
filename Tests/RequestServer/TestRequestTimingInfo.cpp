@@ -290,3 +290,29 @@ TEST_CASE(timing_info_includes_the_dns_lookup)
     EXPECT(timing.request_start_microseconds >= lookup_delay.to_microseconds());
     EXPECT(timing.response_end_microseconds <= finished->elapsed.to_microseconds());
 }
+
+TEST_CASE(a_name_that_resolves_only_to_the_unspecified_address_fails_right_away)
+{
+    // DNS sinkholes, such as ad blockers, block a name by answering with the unspecified address.
+    auto resolver = RequestServer::Resolver::default_resolver();
+    resolver->dns.set_remote_system_resolver([](ByteString const&, Core::Socket::AddressFamily family, Function<void(DNS::Resolver::SystemResolution)> on_resolved) {
+        Vector<Variant<IPv4Address, IPv6Address>> addresses;
+        if (family == Core::Socket::AddressFamily::IPv4Only)
+            addresses.append(IPv4Address { 0, 0, 0, 0 });
+        else
+            addresses.append(IPv6Address {});
+        on_resolved(move(addresses));
+    });
+    ScopeGuard restore_system_resolver = [&] { resolver->dns.set_remote_system_resolver({}); };
+
+    TestServer server;
+    TestConnection connection { server };
+    HTTPServer http_server;
+
+    auto finished = connection.fetch(1, http_server.url_for_path("/resource"sv, "sinkholed.test"sv), AK::Duration::from_seconds(10));
+    EXPECT(finished.has_value());
+    if (!finished.has_value())
+        return;
+    EXPECT(finished->network_error == Requests::NetworkError::UnableToResolveHost);
+    EXPECT(finished->elapsed < AK::Duration::from_seconds(1));
+}
