@@ -971,9 +971,26 @@ TEST_CASE(test_expired_addresses_are_not_mistaken_for_a_negative_answer)
     timer->start();
     loop.exec();
 
+    // Addresses that expired only a moment ago answer right away, and the name is looked up again meanwhile.
     auto second = TRY_OR_FAIL(lookup());
     EXPECT_EQ(second->cached_addresses().size(), 1u);
-    EXPECT(queries > queries_for_first_lookup);
+    EXPECT_EQ(queries, queries_for_first_lookup);
+
+    bool timed_out = false;
+    auto deadline = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { timed_out = true; });
+    deadline->start();
+    loop.spin_until([&] { return queries > queries_for_first_lookup || timed_out; });
+    EXPECT(!timed_out);
+
+    // The answer to that lookup is cached, so the name is not looked up yet again.
+    bool settled = false;
+    auto settle = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(200), [&] { settled = true; });
+    settle->start();
+    loop.spin_until([&] { return settled; });
+    auto queries_after_refresh = queries;
+    auto third = TRY_OR_FAIL(lookup());
+    EXPECT_EQ(third->cached_addresses().size(), 1u);
+    EXPECT_EQ(queries, queries_after_refresh);
 }
 
 namespace {

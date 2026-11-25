@@ -81,6 +81,33 @@ public:
             m_valid = false;
     }
 
+    // A copy that holds the records of the given types, if they all expired less than the given time ago, and none is
+    // still fresh. See Resolver::take_recently_expired_result().
+    RefPtr<LookupResult> copy_if_recently_expired(Span<Messages::ResourceType const> types, AK::Duration within) const
+    {
+        if (!m_request_done || m_security_status == DNSSEC::SecurityStatus::Bogus)
+            return {};
+
+        auto now = AK::UnixDateTime::now();
+        auto copy = make_ref_counted<LookupResult>(m_name);
+        for (auto type : types) {
+            copy->will_add_record_of_type(type);
+            for (auto const& re : m_cached_records) {
+                if (re.record.type != type)
+                    continue;
+                if (re.expiration >= now || now - re.expiration > within)
+                    return {};
+                copy->add_record(re.record);
+            }
+        }
+        if (copy->is_empty())
+            return {};
+        copy->m_security_status = m_security_status;
+        copy->m_validation_attempted = m_validation_attempted;
+        copy->finished_request();
+        return copy;
+    }
+
     void add_record(Messages::ResourceRecord record, AK::UnixDateTime received_at = AK::UnixDateTime::now())
     {
         m_valid = true;
@@ -291,6 +318,25 @@ public:
         return lookup_in_cache(name, class_, Array { Messages::ResourceType::A, Messages::ResourceType::AAAA });
     }
 
+    // NB: Like Firefox, answer with records that expired only a little while ago, and look the name up again in the
+    //     background, rather than make the caller wait for that lookup. A request to a host that the page keeps using
+    //     would otherwise wait for a DNS round trip every time its records expire, even when the connection it ends up
+    //     on is already open. The entry is dropped, so that the lookup in the background replaces it.
+    static constexpr auto RecentlyExpiredWindow = AK::Duration::from_seconds(60);
+    RefPtr<LookupResult const> take_recently_expired_result(StringView name, Span<Messages::ResourceType const> types)
+    {
+        return m_cache.with_write_locked([&](auto& cache) -> RefPtr<LookupResult const> {
+            auto it = cache.find(name);
+            if (it == cache.end())
+                return {};
+            auto copy = it->value->copy_if_recently_expired(types, RecentlyExpiredWindow);
+            if (!copy)
+                return {};
+            cache.remove(it);
+            return copy;
+        });
+    }
+
     RefPtr<LookupResult const> lookup_in_cache(StringView name, Messages::Class, Span<Messages::ResourceType const> desired_types)
     {
         return m_cache.with_read_locked([&](auto& cache) -> RefPtr<LookupResult const> {
@@ -457,6 +503,17 @@ public:
         auto queried_types = desired_types;
         if (skips_aaaa)
             queried_types.remove_first_matching([](auto type) { return type == Messages::ResourceType::AAAA; });
+
+        if (!options.validate_dnssec_locally) {
+            if (auto result = take_recently_expired_result(name, queried_types)) {
+                dbgln_if(DNS_DEBUG, "DNS: Resolved {} from recently expired records, looking it up again", name);
+                promise->resolve(result.release_nonnull());
+                // NB: The lookup keeps itself alive until it is done, and caches its answer.
+                (void)lookup(name, class_, desired_types, options);
+                lookup_path = "cache-recently-expired"sv;
+                return promise;
+            }
+        }
 
         if (auto result = lookup_in_cache(name, class_, queried_types)) {
             dbgln_if(DNS_DEBUG, "DNS: Resolving {} from cache...", name);
