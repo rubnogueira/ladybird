@@ -54,6 +54,9 @@ public:
 
     static void load_fallback_favicon_if_needed(GC::Ref<DOM::Document>);
 
+    // Fetches the icons of the document's links that waited for the document to load.
+    static void fetch_icons_deferred_until_load(DOM::Document&);
+
     enum class LinkHeaderPhase : u8 {
         PreMedia,
         Media,
@@ -236,6 +239,7 @@ private:
     GC::Ptr<DOM::DOMTokenList> m_sizes;
     unsigned m_relationship { 0 };
     u64 m_current_fetch_generation { 0 };
+    bool m_icon_fetch_deferred_until_load { false };
     bool m_stylesheet_processing_pending { false };
     Optional<u64> m_fetch_generation_waiting_for_critical_subresources;
     u64 m_loaded_style_sheet_fetch_generation { 0 };

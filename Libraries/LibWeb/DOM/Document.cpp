@@ -5016,6 +5016,8 @@ void Document::update_readiness(HTML::DocumentReadyState readiness_value)
         HighResolutionTime::current_high_resolution_time(relevant_global_object(*this))));
 
     if (readiness_value == HTML::DocumentReadyState::Complete) {
+        HTML::HTMLLinkElement::fetch_icons_deferred_until_load(*this);
+
         auto navigable = this->navigable();
         if (navigable)
             navigable->restore_pending_persisted_state_for_completed_document(*this);

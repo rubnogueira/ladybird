@@ -563,6 +563,19 @@ void HTMLLinkElement::fetch_and_process_linked_resource()
 // https://html.spec.whatwg.org/multipage/semantics.html#default-fetch-and-process-the-linked-resource
 void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_generation)
 {
+    m_icon_fetch_deferred_until_load = false;
+
+    // AD-HOC: Like other engines, fetch an icon only once the document has loaded. The spec lets user agents fetch a
+    //         resource that does not apply to the document when it is needed, and an icon is only needed for the
+    //         user agent's UI. Fetched while the document loads, an icon competes with the resources that the document
+    //         needs to render, such as for the only connection to an HTTP/1.1 origin that is ready: that would make a
+    //         render-blocking style sheet wait for a connection of its own. Nor does the document's load event wait
+    //         for the icon then.
+    if (m_relationship == Relationship::Icon && document().readiness() != HTML::DocumentReadyState::Complete) {
+        m_icon_fetch_deferred_until_load = true;
+        return;
+    }
+
     // https://html.spec.whatwg.org/multipage/semantics.html#the-link-element:attr-link-href-4
     // If both the href and imagesrcset attributes are absent, then the element does not define a link.
     // FIXME: Support imagesrcset attribute
@@ -1699,6 +1712,20 @@ void HTMLLinkElement::finish_processing_stylesheet_resource(u64 fetch_generation
         }
     } else {
         m_document_load_event_delayer.clear();
+    }
+}
+
+void HTMLLinkElement::fetch_icons_deferred_until_load(DOM::Document& document)
+{
+    Vector<GC::Ref<HTMLLinkElement>> links;
+    document.for_each_in_inclusive_subtree_of_type<HTMLLinkElement>([&](HTMLLinkElement& link) {
+        if (link.m_icon_fetch_deferred_until_load)
+            links.append(link);
+        return TraversalDecision::Continue;
+    });
+    for (auto& link : links) {
+        if (link->m_icon_fetch_deferred_until_load)
+            link->fetch_and_process_linked_resource();
     }
 }
 
