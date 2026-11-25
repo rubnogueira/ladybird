@@ -8,10 +8,10 @@
 #include <AK/LexicalPath.h>
 #include <LibCore/EventLoop.h>
 #include <LibFileSystem/FileSystem.h>
+#include <LibRequests/RequestClient.h>
 #include <LibTest/TestCase.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
-#include <LibRequests/RequestClient.h>
 #include <LibWebView/RequestServerManager.h>
 
 // A RequestServer is sandboxed to the disk cache it opens, so only the one of a site in a normal session may have one.
