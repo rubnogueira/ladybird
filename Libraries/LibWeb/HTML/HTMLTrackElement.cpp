@@ -105,11 +105,17 @@ void HTMLTrackElement::inserted()
     if (auto* media_element = as_if<HTMLMediaElement>(parent()); media_element && !media_element->text_tracks()->contains(*m_track))
         parent_changed(nullptr);
 
-    // AD-HOC: This is a hack to allow tracks to start loading, without needing to implement the entire
-    //         "honor user preferences for automatic text track selection" AO detailed here:
+    // AD-HOC: This stands in for the "honor user preferences for automatic text track selection" AO, which picks the
+    //         tracks with a default attribute when the user has no preferences:
     //         https://html.spec.whatwg.org/multipage/media.html#honor-user-preferences-for-automatic-text-track-selection
-    m_track->set_mode(TextTrackMode::Hidden);
+    //         Such a track is enabled, which starts loading it. Any other track stays disabled, as it would then, until
+    //         the page enables it: a media element can have dozens, one per language, and they would all be fetched.
+    if (has_attribute(HTML::AttributeNames::default_) && m_track->mode() == TextTrackMode::Disabled)
+        m_track->set_mode(TextTrackMode::Hidden);
 
+    // https://html.spec.whatwg.org/multipage/media.html#sourcing-out-of-band-text-tracks
+    // When a track element's parent changes and the new parent is a media element, then the user agent must [...]
+    // start the track processing model, which loads the track only once it is enabled.
     start_the_track_processing_model();
 }
 
