@@ -1,0 +1,516 @@
+From: Ladybird
+Subject: url: reuse an HTTP/2 connection to another host that may serve the transfer
+
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index ee414e5..02645d0 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -2288,6 +2288,13 @@ typedef enum {
+   /* Space-separated list of components to sign for HTTP Message Signatures */
+   CURLOPT(CURLOPT_HTTPSIG_HEADERS, CURLOPTTYPE_STRINGPOINT, 332),
+ 
++  /* Ladybird: let an HTTPS transfer reuse an HTTP/2 connection to another
++     host, as browsers do, if the certificate that the connection verified
++     covers the transfer's host and that host resolves to the address the
++     connection is to. A transfer that the server answers with 421
++     Misdirected Request goes again over a connection of its own. */
++  CURLOPT(CURLOPT_COALESCE, CURLOPTTYPE_LONG, 333),
++
+   CURLOPT_LASTENTRY /* the last unused */
+ } CURLoption;
+ 
+@@ -2342,6 +2349,9 @@ typedef enum {
+ #define CURL_CONNECT_ONLY_PRECONNECT 3L
+ #define LIBCURL_HAS_CONNECT_ONLY_PRECONNECT 1
+ 
++/* Ladybird: CURLOPT_COALESCE is available. */
++#define LIBCURL_HAS_COALESCE 1
++
+ /* These constants are for use with the CURLOPT_HTTP_VERSION option. */
+ #define CURL_HTTP_VERSION_NONE  0L /* setting this means we do not care, and
+                                       that we would like the library to choose
+diff --git a/lib/conncache.c b/lib/conncache.c
+index 7f6d742..99228be 100644
+--- a/lib/conncache.c
++++ b/lib/conncache.c
+@@ -815,6 +815,22 @@ bool Curl_cpool_find(struct Curl_easy *data,
+     }
+   }
+ 
++  if(!destination) {
++    void *entry;
++    uint32_t cpid;
++    if(Curl_uint32_tbl_first(&cpool->conns, &cpid, &entry)) {
++      do {
++        struct connectdata *conn = entry;
++        if(conn && (data->state.last_conn_id != conn->connection_id)) {
++          found = cpool_find_act(cpool, data, conn, conn_cb(conn, userdata));
++          if(found)
++            goto out;
++        }
++      } while(Curl_uint32_tbl_next(&cpool->conns, cpid, &cpid, &entry));
++    }
++    goto out;
++  }
++
+   bundle = cpool_get_bundle(cpool, destination);
+   if(bundle) {
+     uint32_t cpid;
+diff --git a/lib/conncache.h b/lib/conncache.h
+index caf240a..9b4eb1b 100644
+--- a/lib/conncache.h
++++ b/lib/conncache.h
+@@ -118,7 +118,8 @@ typedef bool Curl_cpool_done_match_cb(void *userdata);
+  * Find a connection in the pool matching `destination`.
+  * All callbacks are invoked while the pool's lock is held.
+  * @param data        current transfer
+- * @param destination match against `conn->destination` in pool
++ * @param destination match against `conn->destination` in pool, or NULL
++ *                    to go through every connection in the pool
+  * @param prune_dead  perform reaping of dead connections at start
+  * @param pnow        timestamp of operation
+  * @param conn_cb     must be present, called for each connection in the
+diff --git a/lib/easyoptions.c b/lib/easyoptions.c
+index 1643ec3..42589dc 100644
+--- a/lib/easyoptions.c
++++ b/lib/easyoptions.c
+@@ -50,6 +50,7 @@ const struct curl_easyoption Curl_easyopts[] = {
+   { "CHUNK_END_FUNCTION", CURLOPT_CHUNK_END_FUNCTION, CURLOT_FUNCTION, 0 },
+   { "CLOSESOCKETDATA", CURLOPT_CLOSESOCKETDATA, CURLOT_CBPTR, 0 },
+   { "CLOSESOCKETFUNCTION", CURLOPT_CLOSESOCKETFUNCTION, CURLOT_FUNCTION, 0 },
++  { "COALESCE", CURLOPT_COALESCE, CURLOT_LONG, 0 },
+   { "CONNECTTIMEOUT", CURLOPT_CONNECTTIMEOUT, CURLOT_LONG, 0 },
+   { "CONNECTTIMEOUT_MS", CURLOPT_CONNECTTIMEOUT_MS, CURLOT_LONG, 0 },
+   { "CONNECT_ONLY", CURLOPT_CONNECT_ONLY, CURLOT_LONG, 0 },
+@@ -389,6 +390,6 @@ const struct curl_easyoption Curl_easyopts[] = {
+  */
+ int Curl_easyopts_check(void)
+ {
+-  return (CURLOPT_LASTENTRY % 10000) != (332 + 1);
++  return (CURLOPT_LASTENTRY % 10000) != (333 + 1);
+ }
+ #endif
+diff --git a/lib/http.c b/lib/http.c
+index 016e42c..26098b7 100644
+--- a/lib/http.c
++++ b/lib/http.c
+@@ -1745,6 +1745,7 @@ CURLcode Curl_http_done(struct Curl_easy *data,
+   if(!premature && /* this check is pointless when DONE is called before the
+                       entire operation is complete */
+      !conn->bits.retry &&
++     !data->state.misdirected && /* retried over another connection */
+      !data->set.connect_only &&
+      (data->req.bytecount +
+       data->req.headerbytecount -
+diff --git a/lib/http2.c b/lib/http2.c
+index 2e95741..497992b 100644
+--- a/lib/http2.c
++++ b/lib/http2.c
+@@ -1538,6 +1538,14 @@ static int on_header(nghttp2_session *session, const nghttp2_frame *frame,
+       cf_h2_header_error(cf, data, stream, result);
+       return NGHTTP2_ERR_CALLBACK_FAILURE;
+     }
++    if(stream->status_code == 421 && data->state.coalesced) {
++      /* Ladybird: the server will not answer for the transfer's host over
++       * this connection to another host. Reset the stream, before anything
++       * of the response reaches the transfer, and go again over a
++       * connection of its own (RFC 9113, section 9.1.2). */
++      data->state.misdirected = TRUE;
++      return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
++    }
+     hlen = curl_msnprintf(buffer, sizeof(buffer), HTTP_PSEUDO_STATUS ":%d\r",
+                           stream->status_code);
+     result = Curl_headers_push(data, buffer, hlen, CURLH_PSEUDO);
+@@ -1705,6 +1713,11 @@ static CURLcode http2_handle_stream_close(struct Curl_cfilter *cf,
+ 
+   *pnlen = 0;
+   if(stream->reset) {
++    if(data->state.misdirected) {
++      infof(data, "HTTP/2 stream %d misdirected, try again on a connection "
++                  "to the host", stream->id);
++      return CURLE_RECV_ERROR; /* trigger Curl_retry_request() later */
++    }
+     if(stream->error == NGHTTP2_REFUSED_STREAM) {
+       infof(data, "HTTP/2 stream %d refused by server, try again on a new "
+                   "connection", stream->id);
+diff --git a/lib/setopt.c b/lib/setopt.c
+index 7c04836..59c84d5 100644
+--- a/lib/setopt.c
++++ b/lib/setopt.c
+@@ -724,6 +724,9 @@ static CURLcode setopt_long_bool(struct Curl_easy *data, CURLoption option,
+   case CURLOPT_PIPEWAIT:
+     s->pipewait = enabled;
+     break;
++  case CURLOPT_COALESCE:
++    s->coalesce = enabled;
++    break;
+   case CURLOPT_SUPPRESS_CONNECT_HEADERS:
+     s->suppress_connect_headers = enabled;
+     break;
+diff --git a/lib/transfer.c b/lib/transfer.c
+index 3f0f215..2f2055b 100644
+--- a/lib/transfer.c
++++ b/lib/transfer.c
+@@ -448,6 +448,8 @@ CURLcode Curl_pretransfer(struct Curl_easy *data)
+    * "Connection died, tried CONN_MAX_RETRIES times before giving up".
+    * By resetting it here, we ensure each new request starts fresh. */
+   data->state.retrycount = 0;
++  data->state.misdirected = FALSE;
++  data->state.no_coalesce = FALSE;
+ 
+   if(!CURL_EASY_STR(data, STRING_SET_URL) && !data->set.uh) {
+     /* we cannot do anything without URL */
+@@ -601,6 +603,7 @@ CURLcode Curl_retry_request(struct Curl_easy *data, char **url)
+ {
+   struct connectdata *conn = data->conn;
+   bool retry = FALSE;
++  bool keep_conn = FALSE;
+   *url = NULL;
+ 
+   /* if we are talking upload, we cannot do the checks below, unless the
+@@ -610,7 +613,17 @@ CURLcode Curl_retry_request(struct Curl_easy *data, char **url)
+      !(conn->scheme->protocol & (PROTO_FAMILY_HTTP | CURLPROTO_RTSP)))
+     return CURLE_OK;
+ 
+-  if(conn->bits.reuse &&
++  if(data->state.misdirected &&
++     (data->req.bytecount + data->req.headerbytecount == 0)) {
++    /* Ladybird: the server answered 421 over a connection to another host,
++     * which other transfers may still use. Go again over a connection to
++     * the transfer's own host. */
++    infof(data, "Misdirected request, retrying without coalescing");
++    data->state.no_coalesce = TRUE;
++    keep_conn = TRUE;
++    retry = TRUE;
++  }
++  else if(conn->bits.reuse &&
+      (data->req.bytecount + data->req.headerbytecount == 0) &&
+      ((!data->req.no_body && !data->req.done) ||
+       (conn->scheme->protocol & PROTO_FAMILY_HTTP))
+@@ -651,11 +664,13 @@ CURLcode Curl_retry_request(struct Curl_easy *data, char **url)
+     if(!*url)
+       return CURLE_OUT_OF_MEMORY;
+ 
+-    connclose(conn); /* close this connection */
+-    conn->bits.retry = TRUE; /* mark this as a connection we are about to
+-                                retry. Marking it this way should prevent i.e
+-                                HTTP transfers to return error because nothing
+-                                has been transferred! */
++    if(!keep_conn) {
++      connclose(conn); /* close this connection */
++      conn->bits.retry = TRUE; /* mark this as a connection we are about to
++                                  retry. Marking it this way should prevent
++                                  i.e HTTP transfers to return error because
++                                  nothing has been transferred! */
++    }
+     Curl_creader_set_rewind(data, TRUE);
+   }
+   return CURLE_OK;
+diff --git a/lib/url.c b/lib/url.c
+index 8505fc0..2bbdf49 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -98,6 +98,8 @@
+ #include "curlx/strerr.h"
+ #include "curlx/strparse.h"
+ #include "peer.h"
++#include "vdns/dnscache.h"
++#include "vdns/hostip.h"
+ 
+ /* Now for the protocols */
+ #include "ftp.h"
+@@ -1125,6 +1127,148 @@ static bool url_attach_existing(struct Curl_easy *data,
+                          url_match_conn, url_match_result, m);
+ }
+ 
++#if !defined(CURL_DISABLE_HTTP) && defined(USE_HTTP2)
++/* Ladybird: CURLOPT_COALESCE. */
++struct url_coalesce_match {
++  struct url_conn_match *m;
++  const struct Curl_dns_entry *dns;
++};
++
++/* Whether conn is to an address that the transfer's host resolves to. */
++static bool url_coalesce_addr_matches(struct connectdata *conn,
++                                      struct url_coalesce_match *c)
++{
++  struct ip_quadruple ipquad;
++  const struct Curl_addrinfo *ai;
++  bool is_ipv6;
++
++  if(Curl_conn_get_ip_info(c->m->data, conn, FIRSTSOCKET, &is_ipv6, &ipquad))
++    return FALSE;
++  for(ai = c->dns->addr; ai; ai = ai->ai_next) {
++    char ip[MAX_IPADR_LEN];
++    Curl_printable_address(ai, ip, sizeof(ip));
++    if(!strcmp(ip, ipquad.remote_ip))
++      return TRUE;
++  }
++  return FALSE;
++}
++
++/* Whether conn, an HTTP/2 connection to another host, may carry the
++ * transfer: it would were it to the transfer's host, it is to an address
++ * that host resolves to, and the certificate it verified covers that host.
++ * Never closes a connection, as this goes through the whole pool. */
++static cpool_match_result url_match_coalesce(struct connectdata *conn,
++                                             void *userdata)
++{
++  struct url_coalesce_match *c = userdata;
++  struct url_conn_match *m = c->m;
++
++  /* Connections to the transfer's own host were looked at already. */
++  if(conn->origin->scheme != m->needle->origin->scheme ||
++     conn->origin->port != m->needle->origin->port ||
++     Curl_peer_same_destination(conn->origin, m->needle->origin) ||
++     conn->via_peer)
++    return CPOOL_MATCH_CONT;
++#ifndef CURL_DISABLE_PROXY
++  if(conn->bits.origin_is_proxy || conn->http_proxy.peer ||
++     conn->socks_proxy.peer)
++    return CPOOL_MATCH_CONT;
++#endif
++
++  if(!url_match_connect_config(conn, m) ||
++     !url_match_fully_connected(conn, m))
++    return CPOOL_MATCH_CONT;
++
++  if(!conn->bits.multiplex || (Curl_conn_http_version(m->data, conn) != 20))
++    return CPOOL_MATCH_CONT;
++
++  if(!url_match_multiplex_needs(conn, m) ||
++     !url_match_ssl_use(conn, m) ||
++     !url_match_ssl_config(conn, m) ||
++     !url_match_auth(conn, m) ||
++     !url_match_proto_config(conn, m) ||
++     !url_match_auth_ntlm(conn, m) ||
++     !url_match_auth_nego(conn, m) ||
++     !url_match_multiplex_limits(conn, m))
++    return CPOOL_MATCH_CONT;
++
++  if((m->data->set.conn_max_age_ms > 0) &&
++     (Curl_cpool_conn_age_ms(m->data, conn, &m->now) >
++      m->data->set.conn_max_age_ms))
++    return CPOOL_MATCH_CONT;
++
++  if(!url_coalesce_addr_matches(conn, c) ||
++     !Curl_ssl_conn_cert_covers_host(m->data, conn,
++                                     m->needle->origin->hostname))
++    return CPOOL_MATCH_CONT;
++
++  if(!CONN_INUSE(conn) &&
++     !Curl_cpool_conn_seems_healthy(conn, m->data, &m->now))
++    return CPOOL_MATCH_CONT;
++
++  m->found = conn;
++  return CPOOL_MATCH_FOUND;
++}
++
++static bool url_coalesce_result(void *userdata)
++{
++  struct url_coalesce_match *c = userdata;
++  if(c->m->found) {
++    /* Attach it while still under lock, as url_match_result() does. */
++    Curl_attach_connection(c->m->data, c->m->found, TRUE);
++    return TRUE;
++  }
++  return FALSE;
++}
++
++/*
++ * Ladybird: CURLOPT_COALESCE. Given a transfer that found no connection to
++ * its host to reuse, find and attach an HTTP/2 connection to another host
++ * that may carry it, as browsers do (RFC 9113, section 9.1.1).
++ *
++ * Return TRUE if such a connection was attached.
++ */
++static bool url_attach_coalesced(struct Curl_easy *data,
++                                 struct connectdata *needle,
++                                 struct url_conn_match *m,
++                                 const struct curltime *pnow)
++{
++  struct url_coalesce_match c;
++  struct Curl_dns_entry *dns = NULL;
++  bool found;
++
++  if(!data->set.coalesce || data->state.no_coalesce ||
++     (needle->scheme->protocol != CURLPROTO_HTTPS) ||
++     !m->may_multiplex ||
++     !(data->state.http_neg.allowed & CURL_HTTP_V2x) ||
++     !m->ssl_config.verifypeer || !m->ssl_config.verifyhost ||
++     needle->creds || needle->via_peer ||
++     Curl_host_is_ipnum(needle->origin->hostname))
++    return FALSE;
++#ifndef CURL_DISABLE_PROXY
++  if(needle->bits.origin_is_proxy || needle->http_proxy.peer ||
++     needle->socks_proxy.peer)
++    return FALSE;
++#endif
++
++  /* Only an address the host is known to resolve to will do. */
++  if(Curl_dnscache_get(data, Curl_resolv_dns_queries(data, needle->ip_version),
++                       needle->origin, &dns) || !dns)
++    return FALSE;
++
++  c.m = m;
++  c.dns = dns;
++  m->found = NULL;
++  found = Curl_cpool_find(data, NULL, FALSE, pnow, url_match_coalesce,
++                          url_coalesce_result, &c);
++  Curl_dns_entry_unlink(data, &dns);
++  return found;
++}
++#else
++#define url_attach_coalesced(d, n, m, p) \
++  ((void)(d), (void)(n), (void)(m), (void)(p), FALSE)
++#endif
++
+ /*
+  * Allocate and initialize a new connectdata object.
+  */
+@@ -2304,6 +2448,8 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data,
+   if(result)
+     goto out;
+   match_initialized = TRUE;
++  data->state.coalesced = FALSE;
++  data->state.misdirected = FALSE;
+ 
+   /***********************************************************************
+    * file: is a special case in that it does not need a network connection
+@@ -2382,6 +2528,20 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data,
+             conn->origin->hostname);
+ #endif
+     }
++    else if(url_attach_coalesced(data, needle, &match, pnow)) {
++      /* We attached a connection to another host. It stays one to that
++       * host, which the transfer's requests over it do not change. */
++      struct connectdata *conn = data->conn;
++
++      DEBUGASSERT(conn);
++      conn->bits.reuse = TRUE;
++      if(!data->set.connect_only_preconnect)
++        conn->bits.preconnected = FALSE;
++      data->state.coalesced = TRUE;
++      match.wait_pipe = FALSE;
++      infof(data, "Reusing existing https: connection with host %s for %s",
++            conn->origin->hostname, needle->origin->hostname);
++    }
+   }
+ 
+   if(!data->conn) {
+diff --git a/lib/urldata.h b/lib/urldata.h
+index 4abab7c..7ba822a 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -645,6 +645,9 @@ struct UrlState {
+   BIT(really_alive); /* transfer is really alive in multi, passed INIT */
+   BIT(this_is_a_follow); /* this is a followed Location: request */
+   BIT(refused_stream); /* this was refused, try again */
++  BIT(coalesced); /* the connection is to another host, see CURLOPT_COALESCE */
++  BIT(misdirected); /* got 421 over a coalesced connection, try again */
++  BIT(no_coalesce); /* got 421 over a coalesced connection, do not again */
+   BIT(errorbuf); /* Set to TRUE if the error buffer is already filled in.
+                     This must be set to FALSE every time _easy_perform() is
+                     called. */
+@@ -1112,6 +1115,7 @@ struct UserDefined {
+   BIT(tcp_fastopen);   /* use TCP Fast Open */
+   BIT(ssl_enable_alpn);/* TLS ALPN extension? */
+   BIT(path_as_is);     /* allow dotdots? */
++  BIT(coalesce);       /* reuse HTTP/2 connections to other hosts */
+   BIT(pipewait);       /* wait for multiplex status before starting a new
+                           connection */
+   BIT(suppress_connect_headers); /* suppress proxy CONNECT response headers
+diff --git a/lib/vtls/openssl.c b/lib/vtls/openssl.c
+index 7bb7a8c..7e84b4e 100644
+--- a/lib/vtls/openssl.c
++++ b/lib/vtls/openssl.c
+@@ -5526,6 +5526,21 @@ static bool ossl_cert_status_request(void)
+ #endif
+ }
+ 
++bool Curl_ossl_cert_covers_host(void *ssl, const char *hostname)
++{
++  X509 *cert = SSL_get1_peer_certificate((SSL *)ssl);
++  bool covers;
++
++  if(!cert)
++    return FALSE;
++  /* As browsers match, by the certificate's subject alternative names. */
++  covers = X509_check_host(cert, hostname, 0,
++                           X509_CHECK_FLAG_NEVER_CHECK_SUBJECT |
++                           X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS, NULL) == 1;
++  X509_free(cert);
++  return covers;
++}
++
+ static void *ossl_get_internals(struct ssl_connect_data *connssl,
+                                 CURLINFO info)
+ {
+diff --git a/lib/vtls/openssl.h b/lib/vtls/openssl.h
+index f1e914c..b23c9c8 100644
+--- a/lib/vtls/openssl.h
++++ b/lib/vtls/openssl.h
+@@ -204,5 +204,9 @@ CURLcode Curl_ossl_check_peer_cert(struct Curl_cfilter *cf,
+ /* Report properties of a successful handshake */
+ void Curl_ossl_report_handshake(struct Curl_easy *data, struct ossl_ctx *octx);
+ 
++/* Ladybird: whether the certificate that the server sent over `ssl` (an SSL
++ * pointer) is valid for `hostname` too. */
++bool Curl_ossl_cert_covers_host(void *ssl, const char *hostname);
++
+ #endif /* USE_OPENSSL */
+ #endif /* HEADER_CURL_SSLUSE_H */
+diff --git a/lib/vtls/vtls.c b/lib/vtls/vtls.c
+index 9737319..8ccab21 100644
+--- a/lib/vtls/vtls.c
++++ b/lib/vtls/vtls.c
+@@ -1608,6 +1608,23 @@ bool Curl_ssl_cf_is_proxy(struct Curl_cfilter *cf)
+   return (cf->cft->flags & CF_TYPE_SSL) && (cf->cft->flags & CF_TYPE_PROXY);
+ }
+ 
++bool Curl_ssl_conn_cert_covers_host(struct Curl_easy *data,
++                                    struct connectdata *conn,
++                                    const char *hostname)
++{
++  struct curl_tlssessioninfo info;
++
++  if(!Curl_conn_get_ssl_info(data, conn, FIRSTSOCKET, CF_QUERY_SSL_INFO,
++                             &info) || !info.internals)
++    return FALSE;
++#ifdef USE_OPENSSL
++  if(info.backend == CURLSSLBACKEND_OPENSSL)
++    return Curl_ossl_cert_covers_host(info.internals, hostname);
++#endif
++  (void)hostname;
++  return FALSE;
++}
++
+ struct ssl_easy_config *
+ Curl_ssl_cf_get_easy_config(struct Curl_cfilter *cf,
+                             struct Curl_easy *data)
+diff --git a/lib/vtls/vtls.h b/lib/vtls/vtls.h
+index b7fd4ce..3ff3308 100644
+--- a/lib/vtls/vtls.h
++++ b/lib/vtls/vtls.h
+@@ -222,6 +222,13 @@ extern struct Curl_cftype Curl_cft_ssl;
+ extern struct Curl_cftype Curl_cft_ssl_proxy;
+ #endif
+ 
++/* Ladybird: whether the certificate that the TLS connection `conn` got from
++ * its server is valid for `hostname` too. FALSE when the TLS backend cannot
++ * tell. */
++bool Curl_ssl_conn_cert_covers_host(struct Curl_easy *data,
++                                    struct connectdata *conn,
++                                    const char *hostname);
++
+ #else /* if not USE_SSL */
+ 
+ /* When SSL support is not present, define away these function calls */
+@@ -239,6 +246,7 @@ extern struct Curl_cftype Curl_cft_ssl_proxy;
+ #define Curl_ssl_cfilter_remove(a, b, c) CURLE_OK
+ #define Curl_ssl_cf_get_easy_config(a, b) NULL
+ #define Curl_ssl_cf_get_filter_config(a) NULL
++#define Curl_ssl_conn_cert_covers_host(a, b, c) FALSE
+ #endif
+ 
+ #endif /* HEADER_CURL_VTLS_H */

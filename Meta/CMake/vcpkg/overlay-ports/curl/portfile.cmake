@@ -4,8 +4,10 @@
 #        keeps an HTTP/1.1 connection with stray input pending from being reused.
 # FIXME: Send preconnect.patch upstream. RequestServer needs it for later requests to reuse the connection of a
 #        preconnect. Without it, a preconnect's connection is never reused, so preconnecting only resolves the host.
-# NB: This is vcpkg's own curl port with three more patches. To update curl, update the version in vcpkg.json here.
-set(ladybird_curl_patches "${CMAKE_CURRENT_LIST_DIR}/wake-all-pending-transfers.patch" "${CMAKE_CURRENT_LIST_DIR}/poll-idle-connection-input.patch" "${CMAKE_CURRENT_LIST_DIR}/preconnect.patch")
+# FIXME: Send coalesce.patch upstream. RequestServer uses it to have requests to a host reuse an HTTP/2 connection to
+#        another host that may serve them, as browsers do. Without it, each host gets connections of its own.
+# NB: This is vcpkg's own curl port with four more patches. To update curl, update the version in vcpkg.json here.
+set(ladybird_curl_patches "${CMAKE_CURRENT_LIST_DIR}/wake-all-pending-transfers.patch" "${CMAKE_CURRENT_LIST_DIR}/poll-idle-connection-input.patch" "${CMAKE_CURRENT_LIST_DIR}/preconnect.patch" "${CMAKE_CURRENT_LIST_DIR}/coalesce.patch")
 set(CURRENT_PORT_DIR "${VCPKG_ROOT_DIR}/ports/curl")
 
 macro(vcpkg_from_github)

@@ -1425,6 +1425,20 @@ void Request::set_curl_resolve_list(Optional<ByteString> host_entry)
     m_curl_string_lists.append(resolve_list);
 }
 
+// https://www.rfc-editor.org/rfc/rfc9113#section-9.1.1
+// Like other browsers, let a request to an HTTPS origin go over an HTTP/2 connection to another host, if the certificate
+// that the connection verified covers the request's host, and that host resolves to the address the connection is to.
+// Sites often serve many hostnames from one server under one certificate, so this saves each of them a TCP and a TLS
+// handshake. curl only does this for a host it was given the addresses of, as RequestServer gives it, and tries again
+// over a connection of the request's own if the server answers 421 (Misdirected Request).
+void Request::allow_connection_coalescing()
+{
+#ifdef LIBCURL_HAS_COALESCE
+    auto result = curl_easy_setopt(m_curl_easy_handle, CURLOPT_COALESCE, 1L);
+    VERIFY(result == CURLE_OK);
+#endif
+}
+
 StringView Request::connect_host() const
 {
     if (m_alternative_service.has_value() && !m_alternative_service->host.is_empty())
@@ -1525,6 +1539,7 @@ void Request::handle_connect_state()
     set_option(CURLOPT_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
+    allow_connection_coalescing();
 #ifdef LIBCURL_HAS_CONNECT_ONLY_PRECONNECT
     // Leave the connection in the pool for the requests this connects ahead of. curl never reuses a connection that a
     // plain connect-only transfer made, which would leave such a preconnect good for nothing but resolving the host.
@@ -1590,6 +1605,7 @@ void Request::handle_fetch_state()
     set_option(CURLOPT_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
+    allow_connection_coalescing();
 
 #ifdef LIBCURL_WAKES_ALL_PENDING_TRANSFERS
     // A burst of requests to a new origin would otherwise each open a connection, even if they could all multiplex over

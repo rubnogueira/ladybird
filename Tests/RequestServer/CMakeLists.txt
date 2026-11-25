@@ -21,7 +21,7 @@ if (LINUX)
 endif()
 
 if (NOT WIN32)
-    list(APPEND TEST_SOURCES TestCertificateExceptions.cpp TestHTTP2ConnectionSpecificFields.cpp)
+    list(APPEND TEST_SOURCES TestCertificateExceptions.cpp TestHTTP2ConnectionCoalescing.cpp TestHTTP2ConnectionSpecificFields.cpp)
 endif()
 
 target_sources(TestRequestServer PRIVATE ${TEST_SOURCES})
