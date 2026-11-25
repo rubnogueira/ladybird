@@ -28,7 +28,7 @@ endpoint RequestServer
     export_request(u64 request_id) => (Optional<Requests::ExportedRequest> exported_request)
     import_request(u64 request_id, Requests::ExportedRequest exported_request, bool create_transfer_lease) =|
 
-    ensure_connection(u64 request_id, URL::URL url, ::RequestServer::CacheLevel cache_level) =|
+    ensure_connection(u64 request_id, URL::URL url, ::RequestServer::CacheLevel cache_level, Optional<bool> origin_multiplexes) =|
 
     // Looks up a host that something other than a request connects to, such as a WebRTC ICE server, so that the
     // browser's DNS settings apply to it too.

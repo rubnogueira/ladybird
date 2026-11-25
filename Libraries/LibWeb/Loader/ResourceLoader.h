@@ -79,6 +79,8 @@ public:
 
     void prefetch_dns(GC::Ptr<DOM::Document>, URL::URL const&, URL::URL const& source_url);
     void preconnect(GC::Ptr<DOM::Document>, URL::URL const&, URL::URL const& source_url);
+    // Connects ahead for requests made for a top-level document at the URL, through the client that they will use.
+    void preconnect_for_navigation(URL::URL const&, Optional<bool> origin_multiplexes = {});
 
     static bool is_known_hsts_host(Page&, String const& host);
 

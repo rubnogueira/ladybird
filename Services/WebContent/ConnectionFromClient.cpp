@@ -159,6 +159,14 @@ static void release_memory_of_this_thread()
     GC::Heap::the().collect_garbage_and_return_memory_to_system();
 }
 
+// The browser expects the process to make requests for a top-level document at the URL soon, such as the requests for
+// the subresources of a document the process is about to host. It wants a connection to be ready for them. The browser
+// may also know whether the origin multiplexes requests over one connection.
+void ConnectionFromClient::preconnect_for_navigation(URL::URL url, Optional<bool> origin_multiplexes)
+{
+    Web::ResourceLoader::the().preconnect_for_navigation(url, origin_multiplexes);
+}
+
 // The browser asks for this when the process is near its memory limit, or when its tabs were hidden for a while. The
 // process gives up everything it can work without. What it gives up may cost time to make again.
 void ConnectionFromClient::release_memory()

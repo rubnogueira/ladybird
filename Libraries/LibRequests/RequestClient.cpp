@@ -144,10 +144,10 @@ void RequestClient::release_request_transfer_lease(RequestTransferLeaseKey trans
     async_release_request_transfer_lease(transfer_lease.source_client_id, transfer_lease.source_request_id);
 }
 
-void RequestClient::ensure_connection(URL::URL const& url, RequestServer::CacheLevel cache_level)
+void RequestClient::ensure_connection(URL::URL const& url, RequestServer::CacheLevel cache_level, Optional<bool> origin_multiplexes)
 {
     auto request_id = m_next_request_id++;
-    async_ensure_connection(request_id, url, cache_level);
+    async_ensure_connection(request_id, url, cache_level, origin_multiplexes);
 }
 
 void RequestClient::resolve_host(ByteString const& host, Function<void(Vector<ByteString>)> on_resolved)

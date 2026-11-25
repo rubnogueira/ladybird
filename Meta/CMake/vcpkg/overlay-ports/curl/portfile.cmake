@@ -2,8 +2,10 @@
 #        when it is missing.
 # FIXME: Drop poll-idle-connection-input.patch once curl is updated past 8.23.0: It backports curl/curl@ef6b17cf12d4, which
 #        keeps an HTTP/1.1 connection with stray input pending from being reused.
-# NB: This is vcpkg's own curl port with two more patches. To update curl, update the version in vcpkg.json here.
-set(ladybird_curl_patches "${CMAKE_CURRENT_LIST_DIR}/wake-all-pending-transfers.patch" "${CMAKE_CURRENT_LIST_DIR}/poll-idle-connection-input.patch")
+# FIXME: Send preconnect.patch upstream. RequestServer needs it for later requests to reuse the connection of a
+#        preconnect. Without it, a preconnect's connection is never reused, so preconnecting only resolves the host.
+# NB: This is vcpkg's own curl port with three more patches. To update curl, update the version in vcpkg.json here.
+set(ladybird_curl_patches "${CMAKE_CURRENT_LIST_DIR}/wake-all-pending-transfers.patch" "${CMAKE_CURRENT_LIST_DIR}/poll-idle-connection-input.patch" "${CMAKE_CURRENT_LIST_DIR}/preconnect.patch")
 set(CURRENT_PORT_DIR "${VCPKG_ROOT_DIR}/ports/curl")
 
 macro(vcpkg_from_github)

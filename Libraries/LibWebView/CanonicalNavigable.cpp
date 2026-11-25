@@ -1106,6 +1106,32 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalNavigable::obtain_page_to_host_i
     return page;
 }
 
+// NB: The process that fetched a top-level document's response may have made its request through another RequestServer
+//     client than the one that the document's host makes the document's requests through: the document can go to
+//     another process, and a process makes requests for a site through that site's RequestServer only once it hosts a
+//     document of that site. That client then has no connection to the document's origin, and makes one only once
+//     the document's parser finds a subresource, after the response's connection was ready all along. So the host
+//     connects ahead while the document's body streams in. It is also told whether the origin multiplexes requests,
+//     which its client would otherwise only learn from a response of its own, holding back requests until then.
+static void connect_ahead_for_requests_of_document(WebContentPage& host, NavigationLoader const& loader, URL::URL const& url)
+{
+    if (!url.scheme().is_one_of("http"sv, "https"sv))
+        return;
+
+    Optional<bool> origin_multiplexes;
+    if (auto const* params = loader.result().navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>()) {
+        if (params->fetch_timing_info.has_value() && params->fetch_timing_info->final_connection_timing_info.has_value()) {
+            auto const& protocol = params->fetch_timing_info->final_connection_timing_info->alpn_negotiated_protocol;
+            if (protocol.is_one_of("http/1.0"sv, "http/1.1"sv))
+                origin_multiplexes = false;
+            else if (protocol.is_one_of("h2"sv, "h3"sv))
+                origin_multiplexes = true;
+        }
+    }
+
+    host.client().async_preconnect_for_navigation(url, origin_multiplexes);
+}
+
 ErrorOr<CanonicalNavigable::PageToPopulateDocument> CanonicalNavigable::obtain_page_to_populate_document(CanonicalSessionHistoryEntry& entry, NavigationLoader& loader, WebContentPage& page_that_created_navigation_params)
 {
     auto response_document = loader.response_document();
@@ -1136,6 +1162,12 @@ ErrorOr<CanonicalNavigable::PageToPopulateDocument> CanonicalNavigable::obtain_p
 
     // The host takes the navigable over when the document is activated, after the displayed document is unloaded.
     place_populated_document(*document, *host);
+
+    // NB: Placing the document bound the host to the document's site, which sent it the client for the site's
+    //     RequestServer ahead of this.
+    if (is_top_level_traversable() && !response_document->is_inline_content)
+        connect_ahead_for_requests_of_document(*host, loader, response_document->response_url);
+
     return PageToPopulateDocument { move(host), move(document) };
 }
 

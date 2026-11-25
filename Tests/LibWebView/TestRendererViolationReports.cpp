@@ -86,45 +86,78 @@ public:
     size_t report_barriers() const { return m_report_barriers.load(); }
 
 private:
+    struct IncomingClient {
+        int fd { -1 };
+        StringBuilder request;
+    };
+
     // A connection made to wake accept() can be lost to a signal, so poll and recheck for shutdown instead.
+    // NB: The browser opens connections ahead of the requests it will make, which can then sit idle or never carry a
+    //     request at all, so a connection that has not sent a whole request does not hold up the others.
     void run()
     {
+        Vector<IncomingClient> incoming_clients;
+        Vector<pollfd> poll_fds;
         while (!m_shutting_down.load()) {
-            pollfd poll_fd { .fd = m_socket, .events = POLLIN, .revents = 0 };
-            auto ready = Core::System::poll({ &poll_fd, 1 }, 100);
+            poll_fds.clear_with_capacity();
+            poll_fds.append({ .fd = m_socket, .events = POLLIN, .revents = 0 });
+            for (auto const& client : incoming_clients)
+                poll_fds.append({ .fd = client.fd, .events = POLLIN, .revents = 0 });
+
+            auto ready = Core::System::poll(poll_fds, 100);
             if (ready.is_error() && ready.error().code() != EINTR)
-                return;
+                break;
             if (ready.is_error() || ready.value() == 0)
                 continue;
 
+            // Clients that were polled are at the same index in both lists, past the listening socket. Walk backwards,
+            // so that removing one leaves the indices of those not yet visited as they were.
+            for (size_t i = incoming_clients.size(); i > 0; --i) {
+                if (poll_fds[i].revents == 0)
+                    continue;
+                auto& client = incoming_clients[i - 1];
+                if (!read_request(client))
+                    continue;
+                if (client.request.string_view().contains("\r\n\r\n"sv) && respond(client.fd, client.request.string_view()))
+                    m_held_clients.append(client.fd);
+                else
+                    (void)Core::System::close(client.fd);
+                incoming_clients.remove(i - 1);
+            }
+
+            if (poll_fds[0].revents == 0)
+                continue;
             auto client = ::accept(m_socket, nullptr, nullptr);
             if (client < 0) {
                 if (errno == EAGAIN || errno == ECONNABORTED)
                     continue;
-                return;
+                break;
             }
             // Accepted sockets inherit O_NONBLOCK on some platforms.
             MUST(Core::System::fcntl(client, F_SETFL, 0));
-            if (respond(client))
-                m_held_clients.append(client);
-            else
-                (void)Core::System::close(client);
+            incoming_clients.append({ .fd = client, .request = {} });
         }
+
+        for (auto const& client : incoming_clients)
+            (void)Core::System::close(client.fd);
+    }
+
+    // Reads what the client sent, which poll() reported. Returns whether the client is done sending its request, having
+    // sent all of its headers, closed the connection, or failed.
+    static bool read_request(IncomingClient& client)
+    {
+        Array<u8, 4096> buffer;
+        auto read = Core::System::read(client.fd, buffer);
+        if (read.is_error() || read.value() == 0)
+            return true;
+        client.request.append(StringView { buffer.span().trim(read.value()) });
+        return client.request.string_view().contains("\r\n\r\n"sv);
     }
 
     // Returns whether the request is held, unanswered.
-    bool respond(int client)
+    bool respond(int client, StringView request)
     {
-        StringBuilder request;
-        Array<u8, 4096> buffer;
-        while (!request.string_view().contains("\r\n\r\n"sv)) {
-            auto read = Core::System::read(client, buffer);
-            if (read.is_error() || read.value() == 0)
-                return false;
-            request.append(StringView { buffer.span().trim(read.value()) });
-        }
-
-        auto request_line = request.string_view().split_view("\r\n"sv).first().split_view(' ');
+        auto request_line = request.split_view("\r\n"sv).first().split_view(' ');
         if (request_line.size() < 2)
             return false;
         auto path = request_line[1];

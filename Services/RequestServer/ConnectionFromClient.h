@@ -35,9 +35,12 @@ namespace RequestServer {
 // Cap on an AIA response: these carry one DER or PKCS#7 certificate bundle, never anything large.
 constexpr inline size_t max_aia_response_size = 64 * KiB;
 
+class ConnectionFromClient;
+
 struct AIAFetch {
     AK_ALLOC_WITH_KMALLOC;
 
+    ConnectionFromClient* client { nullptr };
     ByteString url;
     ByteBuffer body;
     Vector<u64> request_ids;
@@ -46,6 +49,35 @@ struct AIAFetch {
 
 // Diagnostics hook shared with the control connection; only does anything under REQUESTSERVER_WIRE_DEBUG.
 void note_event_tick(StringView label);
+
+// A libcurl multi handle, driven by the event loop. Its transfers share one connection pool.
+class CurlMulti : public RefCounted<CurlMulti> {
+    AK_MAKE_NONCOPYABLE(CurlMulti);
+    AK_MAKE_NONMOVABLE(CurlMulti);
+
+public:
+    static NonnullRefPtr<CurlMulti> create();
+    ~CurlMulti();
+
+    void* handle() const { return m_handle; }
+
+    // What the transfers in the pool found out about origins, see ConnectionFromClient::origin_multiplexes() and
+    // ConnectionFromClient::has_warm_connection().
+    HashMap<ByteString, bool> origins_multiplexing;
+    HashMap<ByteString, MonotonicTime> warm_connections;
+
+private:
+    CurlMulti();
+
+    static int on_socket_callback(void*, int sockfd, int what, void* user_data, void*);
+    static int on_timeout_callback(void*, long timeout_ms, void* user_data);
+
+    void* m_handle { nullptr };
+    RefPtr<Core::Timer> m_timer;
+    Optional<MonotonicTime> m_timer_due_at;
+    HashMap<int, NonnullRefPtr<Core::Notifier>> m_read_notifiers;
+    HashMap<int, NonnullRefPtr<Core::Notifier>> m_write_notifiers;
+};
 
 class ConnectionFromClient final
     : public IPC::ConnectionFromClient<RequestClientEndpoint, RequestServerEndpoint> {
@@ -79,6 +111,18 @@ public:
 
     void start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey, ByteString method, URL::URL, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials, HTTP::Cookie::SameSiteContext);
     void request_complete(Badge<Request>, Request const&);
+
+    // Whether this client's connection pool recently got a connection to the origin of the given URL that a new request
+    // to it could most likely use without having to open another one: one that carried an HTTP/2 transfer, which more
+    // requests can be multiplexed over, or one that a preconnect left for the next request.
+    void note_warm_connection(Badge<Request>, URL::URL const&);
+    bool has_warm_connection(URL::URL const&) const;
+
+    // Whether the origin of the given URL multiplexes requests over one connection, as far as this client's transfers,
+    // or the process making them, found out.
+    void note_origin_multiplexes(URL::URL const&, bool multiplexes);
+    Optional<bool> origin_multiplexes(URL::URL const&) const;
+
     void fetch_aia_intermediate(Badge<Request>, ByteString const& url, u64 for_request_id);
 
 private:
@@ -94,7 +138,7 @@ private:
     virtual Messages::RequestServer::StopRequestResponse stop_request(u64 request_id) override;
     virtual Messages::RequestServer::ExportRequestResponse export_request(u64 request_id) override;
     virtual void import_request(u64 request_id, Requests::ExportedRequest, bool create_transfer_lease) override;
-    virtual void ensure_connection(u64 request_id, URL::URL url, ::RequestServer::CacheLevel cache_level) override;
+    virtual void ensure_connection(u64 request_id, URL::URL url, ::RequestServer::CacheLevel cache_level, Optional<bool> origin_multiplexes) override;
     virtual void resolve_host(u64 lookup_id, ByteString host) override;
 
     virtual void websocket_connect(u64 websocket_id, URL::URL, Optional<HTTP::NetworkIsolationKey>, ByteString, Vector<ByteString>, Vector<ByteString>, Vector<HTTP::Header>, u64 originating_page_id, HTTP::Cookie::SameSiteContext) override;
@@ -102,11 +146,12 @@ private:
     virtual void websocket_send_shared(u64 websocket_id, bool, Core::AnonymousBuffer) override;
     virtual void websocket_close(u64 websocket_id, u16, ByteString) override;
 
-    static int on_socket_callback(void*, int sockfd, int what, void* user_data, void*);
-    static int on_timeout_callback(void*, long timeout_ms, void* user_data);
+    friend class CurlMulti;
+
     bool is_live_request_id(u64 request_id) const;
     void cancel_owned_work();
-    void check_active_requests();
+    // Hands the transfers that a multi handle finished to whoever made them, whichever client that is.
+    static void drain_completed_transfers(void* multi_handle);
     void complete_aia_fetch(void* easy_handle, int result_code);
     void fail_websocket(u64 websocket_id, Requests::WebSocket::Error);
     size_t websocket_count() const;
@@ -136,16 +181,8 @@ private:
     RequestTransferLeaseMap& m_request_transfer_leases;
     Optional<HTTP::DiskCache&> m_disk_cache;
 
-    struct CurlMulti {
-        ConnectionFromClient* client { nullptr };
-        void* handle { nullptr };
-        RefPtr<Core::Timer> timer;
-        Optional<MonotonicTime> timer_due_at;
-    };
-    void set_up_curl_multi(CurlMulti&);
-
-    CurlMulti m_fetch_curl;
-    CurlMulti m_websocket_curl;
+    NonnullRefPtr<CurlMulti> m_fetch_curl;
+    NonnullRefPtr<CurlMulti> m_websocket_curl;
 
     HashMap<u64, NonnullOwnPtr<Request>> m_active_requests;
     HashMap<u64, NonnullOwnPtr<Request>> m_active_revalidation_requests;
@@ -165,9 +202,6 @@ private:
     };
     HashMap<u64, WebSocketCookieRequest> m_websocket_cookie_requests;
     HashMap<u64, RefPtr<WebSocket::WebSocket>> m_websockets;
-
-    HashMap<int, NonnullRefPtr<Core::Notifier>> m_read_notifiers;
-    HashMap<int, NonnullRefPtr<Core::Notifier>> m_write_notifiers;
 
     NonnullRefPtr<Resolver> m_resolver;
 

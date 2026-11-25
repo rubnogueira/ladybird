@@ -60,7 +60,7 @@ public:
     bool stop_request(Badge<Request>, Request&);
     void release_request_transfer_lease(Badge<Request>, Request&, RequestTransferLeaseKey);
     void release_request_transfer_lease(RequestTransferLeaseKey);
-    void ensure_connection(URL::URL const&, RequestServer::CacheLevel);
+    void ensure_connection(URL::URL const&, RequestServer::CacheLevel, Optional<bool> origin_multiplexes = {});
     // Calls back with no addresses when the lookup fails or a proxy is configured.
     void resolve_host(ByteString const& host, Function<void(Vector<ByteString>)> on_resolved);
     int request_server_client_id() const { return m_request_server_client_id; }

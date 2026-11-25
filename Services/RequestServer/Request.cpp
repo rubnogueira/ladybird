@@ -578,6 +578,7 @@ NonnullOwnPtr<Request> Request::import(
     request->m_status_code = exported.status_code;
     request->m_reason_phrase = move(exported.reason_phrase);
     request->m_response_headers = HTTP::HeaderList::create(move(exported.response_headers));
+    request->m_http_version = move(exported.http_version);
     request->m_import = Import {};
     request->m_import->body_fd = exported.body.take_fd();
     request->m_import->status_fd = exported.status.take_fd();
@@ -747,8 +748,10 @@ void Request::handle_fetch_complete(int result_code)
         log_chunk_stats(this);
     }
 
-    if (result_code == CURLE_OK)
+    if (result_code == CURLE_OK) {
         update_alternative_services();
+        note_warm_connection_if_needed();
+    }
 
     // https://www.rfc-editor.org/rfc/rfc7838#section-2.4
     // Furthermore, if the connection to the alternative service fails or is unresponsive, the client MAY fall back to
@@ -883,6 +886,33 @@ void Request::reset_for_retry()
         size_t index = 0;
         m_request_headers->delete_all_matching([&](auto const&) { return index++ == cookie_index; });
     }
+}
+
+void Request::note_warm_connection_if_needed()
+{
+    // Only a connection to the origin itself is of use to requests that would otherwise go to an alternative service.
+    if (m_alternative_service.has_value() || m_url.scheme() != "https"sv)
+        return;
+
+    if (m_type == RequestType::Connect) {
+#ifdef LIBCURL_HAS_CONNECT_ONLY_PRECONNECT
+        // The preconnect left its connection for the next request, whichever HTTP version it speaks.
+        m_client->note_warm_connection({}, m_url);
+#endif
+        return;
+    }
+
+    long http_version = 0;
+    if (curl_easy_getinfo(m_curl_easy_handle, CURLINFO_HTTP_VERSION, &http_version) != CURLE_OK)
+        return;
+
+    if (http_version == CURL_HTTP_VERSION_1_0 || http_version == CURL_HTTP_VERSION_1_1)
+        m_client->note_origin_multiplexes(m_url, false);
+    if (http_version != CURL_HTTP_VERSION_2_0)
+        return;
+
+    m_client->note_origin_multiplexes(m_url, true);
+    m_client->note_warm_connection({}, m_url);
 }
 
 void Request::update_alternative_services()
@@ -1320,7 +1350,10 @@ void Request::handle_dns_lookup_state()
     // A client configured to use a proxy for a given request SHOULD NOT directly connect to an alternative service for
     // this request, but instead route it through that proxy.
     m_alternative_service.clear();
-    if (!m_proxy.has_value() && !m_alternative_services_disabled && m_type != RequestType::Connect && m_url.scheme() == "https"sv) {
+    // NB: An alternative service is only of use for a new connection. Forcing the request onto HTTP/3 would keep curl
+    //     from reusing an HTTP/2 connection to the origin that is already open, and pay for another handshake instead.
+    if (!m_proxy.has_value() && !m_alternative_services_disabled && m_type != RequestType::Connect && m_url.scheme() == "https"sv
+        && !m_client->has_warm_connection(m_url)) {
         m_alternative_service = AlternativeServiceCache::the().find(m_client->is_private(), m_url, UnixDateTime::now());
         if (m_alternative_service.has_value() && !can_pin_host_in_curl_resolve_list(connect_host()))
             m_alternative_service.clear();
@@ -1451,8 +1484,17 @@ void Request::handle_connect_state()
 
     set_option(CURLOPT_NOSIGNAL, 1L);
 
+    // NB: curl only lets a request reuse a connection made with the same TLS configuration, so this has to configure
+    //     TLS just as handle_fetch_state() does.
+    if (auto const& path = default_certificate_path(); !path.is_empty())
+        set_option(CURLOPT_CAINFO, path.characters());
+
     if (!configure_certificate_verification())
         return;
+
+#if defined(AK_OS_WINDOWS)
+    set_option(CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
 
     set_option(CURLOPT_URL, url_without_credentials(m_url).characters());
     set_option(CURLOPT_DISALLOW_USERNAME_IN_URL, 1L);
@@ -1460,7 +1502,13 @@ void Request::handle_connect_state()
     set_option(CURLOPT_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
+#ifdef LIBCURL_HAS_CONNECT_ONLY_PRECONNECT
+    // Leave the connection in the pool for the requests this connects ahead of. curl never reuses a connection that a
+    // plain connect-only transfer made, which would leave such a preconnect good for nothing but resolving the host.
+    set_option(CURLOPT_CONNECT_ONLY, CURL_CONNECT_ONLY_PRECONNECT);
+#else
     set_option(CURLOPT_CONNECT_ONLY, 1L);
+#endif
     set_option(CURLOPT_PROXY, m_proxy.has_value() ? m_proxy->to_curl_url().characters() : "");
 
     // Pre-populate the multi's hostcache so libcurl skips its threaded resolver entirely.
@@ -1524,7 +1572,10 @@ void Request::handle_fetch_state()
     // one. The TLS handshake tells curl if a connection can multiplex. A plain HTTP connection only tells curl through
     // the response, and that response may be waiting for this very request. An unpatched curl leaves the requests
     // waiting in the same way over TLS, so builds with a system curl go without this.
-    if (m_url.scheme() == "https"sv)
+    //
+    // NB: An origin known to answer over HTTP/1.x never multiplexes, so its requests don't wait on another request's
+    //     connection to learn that again: each goes ahead with a connection of its own, as in other engines.
+    if (m_url.scheme() == "https"sv && m_client->origin_multiplexes(m_url).value_or(true))
         set_option(CURLOPT_PIPEWAIT, 1L);
 #endif
 
@@ -1841,6 +1892,7 @@ ErrorOr<Requests::ExportedRequest> Request::export_response()
         .status_code = m_status_code,
         .reason_phrase = m_reason_phrase,
         .response_headers = m_response_headers->headers(),
+        .http_version = m_http_version,
         .may_rely_on_certificate_exception = may_rely_on_certificate_exception(),
         .body = move(body),
         .status = move(status),

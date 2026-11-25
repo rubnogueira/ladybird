@@ -21,6 +21,7 @@ ErrorOr<void> encode(Encoder& encoder, Requests::ExportedRequest const& request)
     TRY(encoder.encode(request.status_code));
     TRY(encoder.encode(request.reason_phrase));
     TRY(encoder.encode(request.response_headers));
+    TRY(encoder.encode(request.http_version));
     TRY(encoder.encode(request.may_rely_on_certificate_exception));
     TRY(encoder.encode(request.body));
     TRY(encoder.encode(request.status));
@@ -39,6 +40,7 @@ ErrorOr<Requests::ExportedRequest> decode(Decoder& decoder)
     request.status_code = TRY(decoder.decode<Optional<u32>>());
     request.reason_phrase = TRY(decoder.decode<Optional<String>>());
     request.response_headers = TRY(decoder.decode<Vector<HTTP::Header>>());
+    request.http_version = TRY(decoder.decode<ByteString>());
     request.may_rely_on_certificate_exception = TRY(decoder.decode<bool>());
     request.body = TRY(decoder.decode<IPC::File>());
     request.status = TRY(decoder.decode<IPC::File>());

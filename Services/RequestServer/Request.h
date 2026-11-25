@@ -112,6 +112,7 @@ public:
     u64 request_id() const { return m_request_id; }
     RequestType type() const { return m_type; }
     URL::URL const& url() const { return m_url; }
+    ByteString const& http_version() const { return m_http_version; }
     bool is_complete() const { return m_state == State::Complete || m_state == State::Error; }
     bool has_transfer_lease() const { return m_transfer_lease.has_value(); }
     Optional<Requests::RequestTransferLeaseKey> const& transfer_lease() const { return m_transfer_lease; }
@@ -237,6 +238,7 @@ private:
     StringView connect_host() const;
     void reset_for_retry();
     void update_alternative_services();
+    void note_warm_connection_if_needed();
     bool should_retry_without_alternative_service(int curl_result_code) const;
     u16 connect_port() const;
     void handle_retrieve_cookie_state();

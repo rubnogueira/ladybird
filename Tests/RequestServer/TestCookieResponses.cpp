@@ -236,7 +236,7 @@ public:
 
     void ensure_connection(u64 request_id, URL::URL url)
     {
-        auto message = make<Messages::RequestServer::EnsureConnection>(request_id, move(url), RequestServer::CacheLevel::CreateConnection);
+        auto message = make<Messages::RequestServer::EnsureConnection>(request_id, move(url), RequestServer::CacheLevel::CreateConnection, Optional<bool> {});
         auto response = dispatch(move(message));
         VERIFY(!response);
     }

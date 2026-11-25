@@ -1,0 +1,171 @@
+From: Ladybird
+Subject: connect: add a preconnect level of CURLOPT_CONNECT_ONLY whose connection can be reused
+
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index ccc9a09..ee414e5 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -2334,6 +2334,14 @@ typedef enum {
+   /* Convenient "aliases" */
+ #define CURLOPT_RTSPHEADER CURLOPT_HTTPHEADER
+ 
++/* Ladybird: a value for CURLOPT_CONNECT_ONLY that connects like 1L does, but
++   leaves the connection in the connection pool for later transfers to reuse,
++   as a browser's preconnect would. It reuses a matching connection that is
++   already there instead of opening another one. The application cannot use
++   the connection with curl_easy_send() and curl_easy_recv(). */
++#define CURL_CONNECT_ONLY_PRECONNECT 3L
++#define LIBCURL_HAS_CONNECT_ONLY_PRECONNECT 1
++
+ /* These constants are for use with the CURLOPT_HTTP_VERSION option. */
+ #define CURL_HTTP_VERSION_NONE  0L /* setting this means we do not care, and
+                                       that we would like the library to choose
+diff --git a/lib/conncache.c b/lib/conncache.c
+index 157db0f..7f6d742 100644
+--- a/lib/conncache.c
++++ b/lib/conncache.c
+@@ -1071,6 +1071,18 @@ bool Curl_cpool_conn_seems_healthy(struct connectdata *conn,
+ 
+     Curl_attach_connection(admin, conn, FALSE);
+     healthy = Curl_conn_is_alive(admin, conn, &input_pending);
++    if(healthy && input_pending && poll_input && conn->bits.preconnected &&
++       Curl_conn_is_ssl(conn, FIRSTSOCKET)) {
++      /* A preconnect is done once the TLS handshake is, so nothing has read
++       * what the server sent after it, like TLS 1.3 session tickets. Let TLS
++       * take those in: only application data or the connection's end count
++       * as input, and TLS asks for more when it got neither. */
++      char buf[1];
++      size_t nread = 0;
++      if(Curl_conn_recv(admin, FIRSTSOCKET, buf, sizeof(buf), &nread) ==
++         CURLE_AGAIN)
++        input_pending = FALSE;
++    }
+     Curl_detach_connection(admin);
+     if(healthy && input_pending && poll_input) {
+       /* Non-multiplexed connections without attached transfers should
+diff --git a/lib/http2.c b/lib/http2.c
+index 9010179..2e95741 100644
+--- a/lib/http2.c
++++ b/lib/http2.c
+@@ -1842,8 +1842,11 @@ out:
+   }
+   /* Defer flushing during the connect phase so that the SETTINGS and
+    * other initial frames are sent together with the first request.
+-   * Unless we are 'connect_only' where the request will never come. */
+-  if(!cf->connected && !cf->conn->bits.connect_only)
++   * Unless we are 'connect_only' where the request will never come, which
++   * goes for a preconnect too: its connection may wait in the pool for a
++   * while, and servers expect the connection preface soon. */
++  if(!cf->connected && !cf->conn->bits.connect_only &&
++     !(data && data->set.connect_only_preconnect))
+     return CURLE_OK;
+   return nw_out_flush(cf, data);
+ }
+diff --git a/lib/multi.c b/lib/multi.c
+index f38cd01..3c0f8b0 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -820,7 +820,8 @@ CURLMcode Curl_multi_remove_handle(struct Curl_multi *multi,
+   /* Tell event handling that this transfer is definitely going away */
+   Curl_multi_ev_xfer_done(multi, data);
+ 
+-  if(data->set.connect_only) {
++  /* A preconnect leaves its connection in the pool for others to reuse. */
++  if(data->set.connect_only && !data->set.connect_only_preconnect) {
+     if(data->multi_easy) {
+       if(data->state.last_conn_id != -1) {
+         /* Mark any connect-only connection for closure */
+diff --git a/lib/setopt.c b/lib/setopt.c
+index dff8a6d..7c04836 100644
+--- a/lib/setopt.c
++++ b/lib/setopt.c
+@@ -840,11 +840,12 @@ static CURLcode setopt_long_net(struct Curl_easy *data, CURLoption option,
+       s->ipver = (unsigned char)arg;
+     break;
+   case CURLOPT_CONNECT_ONLY:
+-    if(arg < 0 || arg > 2)
++    if(arg < 0 || arg > CURL_CONNECT_ONLY_PRECONNECT)
+       result = CURLE_BAD_FUNCTION_ARGUMENT;
+     else {
+       s->connect_only = !!arg;
+       s->connect_only_ws = (arg == 2);
++      s->connect_only_preconnect = (arg == CURL_CONNECT_ONLY_PRECONNECT);
+     }
+     break;
+ #ifdef USE_IPV6
+diff --git a/lib/url.c b/lib/url.c
+index b189d52..8505fc0 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -793,10 +793,13 @@ static bool url_match_http_multiplex(struct connectdata *conn,
+                                      struct url_conn_match *m,
+                                      bool *pwait_pipe)
+ {
++  /* A preconnect's idle connection has not carried a request yet, so the
++   * first request over it can still negotiate any HTTP version. */
+   if(m->may_multiplex &&
+      (m->data->state.http_neg.allowed & (CURL_HTTP_V2x | CURL_HTTP_V3x)) &&
+      (m->needle->scheme->protocol & CURLPROTO_HTTP) &&
+-     !conn->httpversion_seen) {
++     !conn->httpversion_seen &&
++     !(conn->bits.preconnected && !CONN_INUSE(conn))) {
+     if(m->data->set.pipewait) {
+       infof(m->data, "Server upgrade does not support multiplex yet, wait");
+       m->found = NULL;
+@@ -1147,7 +1150,10 @@ static struct connectdata *allocate_conn(struct Curl_easy *data)
+   conn->bits.ftp_use_eprt = data->set.ftp_use_eprt;
+ #endif
+   conn->ip_version = data->set.ipver;
+-  conn->bits.connect_only = (bool)data->set.connect_only;
++  /* A preconnect's connection is an ordinary one that others may reuse. */
++  conn->bits.connect_only = data->set.connect_only &&
++                            !data->set.connect_only_preconnect;
++  conn->bits.preconnected = data->set.connect_only_preconnect;
+   conn->transport_wanted = TRNSPRT_TCP; /* most of them are TCP streams */
+ 
+   /* Store the local bind parameters that will be used for this connection */
+@@ -2339,12 +2345,12 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data,
+ 
+   /*************************************************************
+    * Reuse of existing connection is not allowed when
+-   * - connect_only is set or
++   * - connect_only is set, unless it is a preconnect, or
+    * - reuse_fresh is set and this is not a follow-up request
+    *   (like with HTTP followlocation)
+    *************************************************************/
+   if((!data->set.reuse_fresh || data->state.followlocation) &&
+-     !data->set.connect_only) {
++     (!data->set.connect_only || data->set.connect_only_preconnect)) {
+     /* Ok, try to find and attach an existing one */
+     if(url_attach_existing(data, needle, &match, pnow)) {
+       /* We attached an existing connection for this transfer. Copy
+@@ -2356,6 +2362,8 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data,
+ 
+       DEBUGASSERT(conn);
+       conn->bits.reuse = TRUE;
++      if(!data->set.connect_only_preconnect)
++        conn->bits.preconnected = FALSE;
+       url_conn_reuse_adjust(data, needle);
+ 
+ #ifndef CURL_DISABLE_PROXY
+diff --git a/lib/urldata.h b/lib/urldata.h
+index 249331d..4abab7c 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -180,6 +180,7 @@ typedef enum {
+  */
+ struct ConnectBits {
+   BIT(connect_only);
++  BIT(preconnected); /* made by a preconnect, has not carried a request yet */
+ #ifndef CURL_DISABLE_PROXY
+   BIT(origin_is_proxy);  /* if set, the connection's origin is a proxy */
+   BIT(socks5_authenticated); /* SOCKS5 authenticated on FIRSTSOCKET */
+@@ -1034,6 +1035,8 @@ struct UserDefined {
+   BIT(connect_only); /* make connection/request, then let application use the
+                         socket */
+   BIT(connect_only_ws); /* special websocket connect-only level */
++  BIT(connect_only_preconnect); /* connect-only level that leaves the
++                                   connection for other transfers to reuse */
+ #ifndef CURL_DISABLE_SMTP
+   BIT(mail_rcpt_allowfails); /* allow RCPT TO command to fail for some
+                                 recipients */

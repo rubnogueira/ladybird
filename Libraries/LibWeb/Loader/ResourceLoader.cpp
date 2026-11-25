@@ -17,6 +17,7 @@
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
 #include <LibURL/Parser.h>
+#include <LibURL/Site.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Engine/NetworkTransportHandle.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
@@ -201,6 +202,26 @@ void ResourceLoader::preconnect(GC::Ptr<DOM::Document> document, URL::URL const&
     // FIXME: We could put this request in a queue until the client connection is re-established.
     if (auto request_client = request_client_for(speculative_network_isolation_key(document)))
         request_client->ensure_connection(url, RequestServer::CacheLevel::CreateConnection);
+}
+
+void ResourceLoader::preconnect_for_navigation(URL::URL const& url, Optional<bool> origin_multiplexes)
+{
+    if (!url.scheme().is_one_of("http"sv, "https"sv))
+        return;
+
+    // Speculation would resolve and connect without the proxy that the PAC file would have picked.
+    if (proxy_autoconfig_url().has_value())
+        return;
+
+    // NB: The network partition key of a top-level navigation's request, and of the requests of the document it
+    //     creates, has the site of the document's URL as its top-level site, so this picks the client they go through.
+    auto top_level_site = URL::Site::serialize_for_partitioning(url.origin());
+    if (!top_level_site.has_value())
+        return;
+
+    // FIXME: We could put this request in a queue until the client connection is re-established.
+    if (auto request_client = request_client_for_top_level_site(top_level_site))
+        request_client->ensure_connection(url, RequestServer::CacheLevel::CreateConnection, origin_multiplexes);
 }
 
 String network_error_description(Requests::NetworkError network_error)

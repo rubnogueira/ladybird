@@ -31,6 +31,8 @@ struct ExportedRequest {
     Optional<u32> status_code;
     Optional<String> reason_phrase;
     Vector<HTTP::Header> response_headers;
+    // The HTTP version of the response's status line, in lowercase, e.g. "http/1.1", or empty if unknown.
+    ByteString http_version;
 
     // The exporter could only reach the server through a certificate exception, so the response must not be cached.
     bool may_rely_on_certificate_exception { false };
