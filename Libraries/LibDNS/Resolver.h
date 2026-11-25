@@ -557,7 +557,7 @@ public:
                     ask_remote_resolver(family);
                     return;
                 }
-                Threading::ThreadPool::the().submit(
+                Threading::ThreadPool::for_blocking_waits().submit(
                     [this, shared = m_shared_with_workers, name, pending_key, state = our_state, family,
                         &main_thread_event_loop]() mutable {
                         auto worker_started_at = MonotonicTime::now();

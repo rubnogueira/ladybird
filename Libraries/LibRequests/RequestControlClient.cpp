@@ -77,7 +77,7 @@ void RequestControlClient::resolve_host_with_system_resolver(u64 resolution_id, 
 {
     // getaddrinfo() blocks, for as long as the lookup takes, so it runs on a worker, and the answer goes back to
     // RequestServer from this thread.
-    Threading::ThreadPool::the().submit([weak_this = make_weak_ptr<RequestControlClient>(), resolution_id, host = move(host), ipv6, event_loop = Core::EventLoop::current_weak()] mutable {
+    Threading::ThreadPool::for_blocking_waits().submit([weak_this = make_weak_ptr<RequestControlClient>(), resolution_id, host = move(host), ipv6, event_loop = Core::EventLoop::current_weak()] mutable {
         auto family = ipv6 ? Core::Socket::AddressFamily::IPv6Only : Core::Socket::AddressFamily::IPv4Only;
         auto addresses_or_error = Core::Socket::resolve_host(host, Core::Socket::SocketType::Stream, family);
 
