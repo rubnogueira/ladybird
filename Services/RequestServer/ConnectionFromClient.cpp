@@ -5,7 +5,6 @@
  */
 
 #include <AK/AllOf.h>
-#include <AK/IDAllocator.h>
 #include <AK/Math.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/WeakPtr.h>
@@ -34,7 +33,6 @@
 
 namespace RequestServer {
 
-static IDAllocator s_client_ids;
 static size_t s_private_connection_count { 0 };
 
 static constexpr size_t max_websockets_per_client = 256;
@@ -240,8 +238,8 @@ static NonnullRefPtr<CurlMulti> fetch_multi_for(IsPrivate is_private)
     return *multi;
 }
 
-ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transport, IsPrivate is_private, SiteBinding site_binding, ConnectionMap& connections, RequestTransferLeaseMap& request_transfer_leases, Optional<HTTP::DiskCache&> disk_cache)
-    : IPC::ConnectionFromClient<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport), s_client_ids.allocate())
+ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transport, int id, IsPrivate is_private, SiteBinding site_binding, ConnectionMap& connections, RequestTransferLeaseMap& request_transfer_leases, Optional<HTTP::DiskCache&> disk_cache)
+    : IPC::ConnectionFromClient<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport), id)
     , m_is_private(is_private)
     , m_site_binding(site_binding)
     , m_connections(connections)
@@ -268,8 +266,6 @@ ConnectionFromClient::~ConnectionFromClient()
 
     if (auto connection = ControlConnectionFromClient::the(); connection.has_value())
         connection->async_client_disconnected(client_id());
-
-    s_client_ids.deallocate(client_id());
 }
 
 // curl closes connections that have been idle for longer than CURLOPT_MAXAGE_CONN (118 seconds by default), and servers

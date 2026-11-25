@@ -84,63 +84,32 @@ void ControlConnectionFromClient::die()
         Core::EventLoop::current().quit(0);
 }
 
-ErrorOr<ControlConnectionFromClient::ClientSocket> ControlConnectionFromClient::create_client_socket(IsPrivate is_private, SiteBinding site_binding)
-{
-    auto paired = TRY(IPC::Transport::create_paired());
-    auto handle = move(paired.remote_handle);
-    auto disk_cache = is_private == IsPrivate::Yes ? Optional<HTTP::DiskCache&> {} : m_disk_cache;
-
-    // Note: A ref is stored in the m_connections map
-    auto client = adopt_ref(*new RequestServer::ConnectionFromClient(move(paired.local), is_private, site_binding, m_connections, m_request_transfer_leases, disk_cache));
-
-    return ClientSocket { .handle = move(handle), .client_id = client->client_id() };
-}
-
 static bool is_valid_site_binding(SiteBinding site_binding)
 {
     return site_binding == SiteBinding::Unrestricted || site_binding == SiteBinding::Bound;
 }
 
-Messages::RequestServerControl::ConnectNewClientResponse ControlConnectionFromClient::connect_new_client(IsPrivate is_private, SiteBinding site_binding)
+void ControlConnectionFromClient::connect_client(IPC::TransportHandle handle, int client_id, IsPrivate is_private, SiteBinding site_binding)
 {
     if (!is_valid_site_binding(site_binding)) {
-        did_misbehave("connect_new_client: invalid site binding");
-        return { IPC::TransportHandle {}, -1 };
+        did_misbehave("connect_client: invalid site binding");
+        return;
+    }
+    if (client_id <= 0 || m_connections.contains(client_id)) {
+        did_misbehave("connect_client: invalid or live client ID");
+        return;
     }
 
-    auto client_socket = create_client_socket(is_private, site_binding);
-    if (client_socket.is_error()) {
-        dbgln("Failed to create client socket: {}", client_socket.error());
-        return { IPC::TransportHandle {}, -1 };
+    auto transport = handle.create_transport();
+    if (transport.is_error()) {
+        dbgln("Failed to connect client {}: {}", client_id, transport.error());
+        return;
     }
 
-    return { move(client_socket.value().handle), client_socket.value().client_id };
-}
+    auto disk_cache = is_private == IsPrivate::Yes ? Optional<HTTP::DiskCache&> {} : m_disk_cache;
 
-Messages::RequestServerControl::ConnectNewClientsResponse ControlConnectionFromClient::connect_new_clients(size_t count, IsPrivate is_private, SiteBinding site_binding)
-{
-    if (!is_valid_site_binding(site_binding)) {
-        did_misbehave("connect_new_clients: invalid site binding");
-        return { Vector<IPC::TransportHandle> {}, Vector<int> {} };
-    }
-
-    Vector<IPC::TransportHandle> handles;
-    Vector<int> client_ids;
-    handles.ensure_capacity(count);
-    client_ids.ensure_capacity(count);
-
-    for (size_t i = 0; i < count; ++i) {
-        auto client_socket = create_client_socket(is_private, site_binding);
-        if (client_socket.is_error()) {
-            dbgln("Failed to create client socket: {}", client_socket.error());
-            return { Vector<IPC::TransportHandle> {}, Vector<int> {} };
-        }
-
-        handles.unchecked_append(move(client_socket.value().handle));
-        client_ids.unchecked_append(client_socket.value().client_id);
-    }
-
-    return { move(handles), move(client_ids) };
+    // Note: A ref is stored in the m_connections map
+    (void)adopt_ref(*new RequestServer::ConnectionFromClient(transport.release_value(), client_id, is_private, site_binding, m_connections, m_request_transfer_leases, disk_cache));
 }
 
 void ControlConnectionFromClient::bind_client_to_site(int client_id, Utf16String top_level_site, Optional<Utf16String> frame_site)

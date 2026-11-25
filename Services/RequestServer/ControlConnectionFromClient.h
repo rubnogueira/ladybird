@@ -40,8 +40,7 @@ public:
 private:
     ControlConnectionFromClient(NonnullOwnPtr<IPC::Transport>, RequestServer::ConnectionFromClient::ConnectionMap&, RequestServer::ConnectionFromClient::RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
 
-    virtual Messages::RequestServerControl::ConnectNewClientResponse connect_new_client(IsPrivate, SiteBinding) override;
-    virtual Messages::RequestServerControl::ConnectNewClientsResponse connect_new_clients(size_t count, IsPrivate, SiteBinding) override;
+    virtual void connect_client(IPC::TransportHandle, int client_id, IsPrivate, SiteBinding) override;
     virtual void bind_client_to_site(int client_id, Utf16String top_level_site, Optional<Utf16String> frame_site) override;
 
     virtual void designate_request_adopter(u64 designation_id, int source_client_id, u64 source_request_id, int adopter_client_id) override;
@@ -67,11 +66,6 @@ private:
 
     virtual void resolved_host_with_system_resolver(u64 resolution_id, Optional<Vector<ByteString>> addresses) override;
 
-    struct ClientSocket {
-        IPC::TransportHandle handle;
-        int client_id { -1 };
-    };
-    ErrorOr<ClientSocket> create_client_socket(IsPrivate, SiteBinding);
     void push_network_usage();
 
     RequestServer::ConnectionFromClient::ConnectionMap& m_connections;

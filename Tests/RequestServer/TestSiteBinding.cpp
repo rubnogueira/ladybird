@@ -17,6 +17,9 @@
 #include <RequestServer/ControlConnectionFromClient.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
 
+// The UI process picks the IDs of RequestServer's clients.
+static int s_last_client_id { 0 };
+
 namespace {
 
 enum class Navigation {
@@ -56,7 +59,7 @@ struct TestServer {
         auto pair = MUST(IPC::Transport::create_paired());
         remote_transport = MUST(pair.remote_handle.create_transport());
         connection = RequestServer::ConnectionFromClient::construct(
-            move(pair.local), RequestServer::IsPrivate::No, RequestServer::SiteBinding::Bound,
+            move(pair.local), ++s_last_client_id, RequestServer::IsPrivate::No, RequestServer::SiteBinding::Bound,
             connections, request_transfer_leases, *disk_cache);
     }
 

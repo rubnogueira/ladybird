@@ -126,7 +126,7 @@ public:
     void fetch_aia_intermediate(Badge<Request>, ByteString const& url, u64 for_request_id);
 
 private:
-    ConnectionFromClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, SiteBinding, ConnectionMap&, RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
+    ConnectionFromClient(NonnullOwnPtr<IPC::Transport>, int client_id, IsPrivate, SiteBinding, ConnectionMap&, RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
 
     bool may_use_network_isolation_key(HTTP::NetworkIsolationKey const&, URL::URL const* request_url = nullptr) const;
 

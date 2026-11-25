@@ -23,6 +23,9 @@
 #include <RequestServer/Resolver.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
 
+// The UI process picks the IDs of RequestServer's clients.
+static int s_last_client_id { 0 };
+
 namespace {
 
 static void initialize_libcurl()
@@ -78,7 +81,7 @@ public:
         auto pair = MUST(IPC::Transport::create_paired());
         m_remote_transport = MUST(pair.remote_handle.create_transport());
         m_connection = RequestServer::ConnectionFromClient::construct(
-            move(pair.local), RequestServer::IsPrivate::No, site_binding,
+            move(pair.local), ++s_last_client_id, RequestServer::IsPrivate::No, site_binding,
             server.connections, server.request_transfer_leases, server.disk_cache);
     }
 

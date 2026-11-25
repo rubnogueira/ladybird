@@ -166,7 +166,7 @@ ErrorOr<void> RequestServerManager::launch_process(RequestServerInstance& instan
 
     auto connection = TRY(connect_new_client(instance, instance.session(), RequestServer::SiteBinding::Unrestricted));
     auto transport = TRY(connection.handle.create_transport());
-    auto ui_client = make_ref_counted<Requests::RequestClient>(move(transport));
+    auto ui_client = make_ref_counted<Requests::RequestClient>(move(transport), connection.client_id);
     instance.m_ui_client = move(ui_client);
 
     return {};
@@ -176,24 +176,24 @@ ErrorOr<RequestServerClientConnection> RequestServerManager::connect_new_client(
 {
     auto is_private = session.is_private() == IsPrivate::Yes ? RequestServer::IsPrivate::Yes : RequestServer::IsPrivate::No;
 
-    // Random client IDs can collide across RequestServers. The UI identifies clients by ID alone, so retry collisions.
-    for (size_t attempt = 0; attempt < 8; ++attempt) {
-        auto response = send_sync_to_helper<Messages::RequestServerControl::ConnectNewClient>(instance.control_client(), is_private, site_binding);
-        if (!response || response->client_id() < 0)
-            return Error::from_string_literal("Failed to connect to RequestServer");
+    // The UI identifies clients by ID alone, so it picks IDs that no client of any RequestServer has.
+    int client_id = 0;
+    while (client_id <= 0 || Application::the().session_for_request_server_client(client_id))
+        client_id = static_cast<int>(get_random_uniform(NumericLimits<int>::max()));
 
-        auto client_id = response->client_id();
-        if (Application::the().session_for_request_server_client(client_id))
-            continue;
+    // NB: Nothing here waits for the RequestServer, which may still be starting up, as it is when the UI process launched
+    //     it for the request of a navigation that is about to start. The client's messages wait in the connection until
+    //     the RequestServer takes its end over.
+    auto paired = TRY(IPC::Transport::create_paired());
+    auto server_handle = TRY(paired.local->release_for_transfer());
+    instance.control_client().async_connect_client(move(server_handle), client_id, is_private, site_binding);
 
-        Application::the().did_connect_request_server_client(client_id, session, site_binding);
-        if (site_binding == RequestServer::SiteBinding::Bound) {
-            instance.m_client_ids.set(client_id);
-            instance.m_idle_timer = nullptr;
-        }
-        return RequestServerClientConnection { .handle = response->take_handle(), .client_id = client_id };
+    Application::the().did_connect_request_server_client(client_id, session, site_binding);
+    if (site_binding == RequestServer::SiteBinding::Bound) {
+        instance.m_client_ids.set(client_id);
+        instance.m_idle_timer = nullptr;
     }
-    return Error::from_string_literal("RequestServer keeps handing out client IDs that are in use");
+    return RequestServerClientConnection { .handle = move(paired.remote_handle), .client_id = client_id };
 }
 
 void RequestServerManager::retire_without_delay_once_disconnected(int client_id)

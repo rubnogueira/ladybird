@@ -9,9 +9,10 @@
 endpoint RequestServerControl
 {
 
-    // The client IDs let the UI process tell whose cookies a client may use.
-    connect_new_client(::RequestServer::IsPrivate is_private, ::RequestServer::SiteBinding site_binding) => (IPC::TransportHandle handle, int client_id)
-    connect_new_clients(size_t count, ::RequestServer::IsPrivate is_private, ::RequestServer::SiteBinding site_binding) => (Vector<IPC::TransportHandle> handles, Vector<int> client_ids)
+    // The client IDs let the UI process tell whose cookies a client may use. The UI process picks them, so that they are
+    // unique across all RequestServers, and makes the client's connection itself. It hands the other end to the client
+    // right away, without waiting for this process to start up: the client's messages wait in the connection until then.
+    connect_client(IPC::TransportHandle handle, int client_id, ::RequestServer::IsPrivate is_private, ::RequestServer::SiteBinding site_binding) =|
 
     // Lets a bound client make requests for documents of frame_site under a top-level document of top_level_site. This
     // is synchronous, so the binding is in place before the UI process lets the client's process host such a document.

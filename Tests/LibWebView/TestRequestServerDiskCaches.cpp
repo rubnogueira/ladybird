@@ -10,6 +10,7 @@
 #include <LibTest/TestCase.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
+#include <LibRequests/RequestClient.h>
 #include <LibWebView/RequestServerManager.h>
 
 // A RequestServer is sandboxed to the disk cache it opens, so only the one of a site in a normal session may have one.
@@ -23,13 +24,17 @@ TEST_CASE(only_sites_of_normal_sessions_have_disk_caches)
     auto private_session = WebView::Application::session_for_new_view(WebView::IsPrivate::Yes);
 
     auto site_server = TRY_OR_FAIL(manager.instance_for_site(normal_session, "https://normal.example"_utf16));
+    // NB: A launch doesn't wait for the RequestServer to start up, so wait for it to answer before looking at its cache.
+    (void)site_server->ui_client().send_sync<Messages::RequestServer::GetClientId>();
     EXPECT(FileSystem::is_directory(LexicalPath::join(site_server->cache_path(), "Cache"sv).string()));
 
     // A directory named after the site would reveal that the site was visited in a private session.
     auto private_site_server = TRY_OR_FAIL(manager.instance_for_site(*private_session, "https://private.example"_utf16));
+    (void)private_site_server->ui_client().send_sync<Messages::RequestServer::GetClientId>();
     EXPECT(!FileSystem::exists(private_site_server->cache_path()));
 
     auto browser_server = TRY_OR_FAIL(manager.browser_instance(normal_session));
+    (void)browser_server->ui_client().send_sync<Messages::RequestServer::GetClientId>();
     auto shared_cache = LexicalPath::join(browser_server->cache_path(), "Cache"sv).string();
     EXPECT(!FileSystem::exists(shared_cache));
 }

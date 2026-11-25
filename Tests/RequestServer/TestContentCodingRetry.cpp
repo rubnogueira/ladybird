@@ -16,6 +16,9 @@
 #include <RequestServer/ConnectionFromClient.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
 
+// The UI process picks the IDs of RequestServer's clients.
+static int s_last_client_id { 0 };
+
 namespace {
 
 // A local HTTP server that records the head of each request, and answers each with a body whose content coding libcurl
@@ -100,7 +103,7 @@ TEST_CASE(content_coding_retry_keeps_client_supplied_cookie_header)
     auto pair = MUST(IPC::Transport::create_paired());
     auto remote_transport = MUST(pair.remote_handle.create_transport());
     auto connection = RequestServer::ConnectionFromClient::construct(
-        move(pair.local), RequestServer::IsPrivate::No, RequestServer::SiteBinding::Unrestricted, connections, request_transfer_leases, Optional<HTTP::DiskCache&> {});
+        move(pair.local), ++s_last_client_id, RequestServer::IsPrivate::No, RequestServer::SiteBinding::Unrestricted, connections, request_transfer_leases, Optional<HTTP::DiskCache&> {});
 
     UnsupportedCodingServer server;
     auto message = make<Messages::RequestServer::StartRequest>(

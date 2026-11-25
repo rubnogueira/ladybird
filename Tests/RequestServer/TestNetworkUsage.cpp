@@ -17,6 +17,9 @@
 #include <RequestServer/ConnectionFromClient.h>
 #include <RequestServer/ControlConnectionFromClient.h>
 
+// The UI process picks the IDs of RequestServer's clients.
+static int s_last_client_id { 0 };
+
 namespace {
 
 struct TestServer {
@@ -36,7 +39,7 @@ struct TestServer {
         auto pair = MUST(IPC::Transport::create_paired());
         remote_transport = MUST(pair.remote_handle.create_transport());
         connection = RequestServer::ConnectionFromClient::construct(
-            move(pair.local), RequestServer::IsPrivate::No, RequestServer::SiteBinding::Unrestricted,
+            move(pair.local), ++s_last_client_id, RequestServer::IsPrivate::No, RequestServer::SiteBinding::Unrestricted,
             connections, request_transfer_leases, Optional<HTTP::DiskCache&> {});
 
         auto message = make<Messages::RequestServerControl::SetPerformanceMonitorEnabled>(true);
