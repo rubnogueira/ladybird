@@ -11,6 +11,7 @@
 #include <LibCore/EventLoop.h>
 #include <LibCore/StatsLog.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibURL/Site.h>
 #include <LibWebCommon/Geolocation/GeolocationPositionErrorCode.h>
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/Page/InputEvent.h>
@@ -2788,6 +2789,17 @@ void WebContentPage::did_complete_navigation_unload_check(Web::HTML::CrossProces
     // NB: The UI process admitted the navigation, so it reads a file: URL's file itself, with the navigation's local
     //     file access.
     ongoing_navigation->state = CanonicalNavigation::CreatingNavigationParams { NavigationLoader::create(move(population_request), ongoing_navigation->local_file_access) };
+
+    // NB: The process gets the client ahead of the request that the navigation params creation starts, over the same
+    //     connection.
+    auto const& url = ongoing_navigation->loader()->request().history_entry.url;
+    if (navigable->is_top_level_traversable() && url.scheme().is_one_of("http"sv, "https"sv)) {
+        if (auto top_level_site = URL::Site::serialize_for_partitioning(url.origin()); top_level_site.has_value()) {
+            if (auto result = client().request_server_site_bindings().connect_for_navigation_to(*top_level_site); result.is_error())
+                warnln("Unable to connect a process to the RequestServer for {}: {}", *top_level_site, result.error());
+        }
+    }
+
     async_create_navigation_params(ongoing_navigation->loader()->request());
 
     // Requesting navigation params starts the fetch, so a view's top-level population begins its recorded

@@ -1106,13 +1106,13 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalNavigable::obtain_page_to_host_i
     return page;
 }
 
-// NB: The process that fetched a top-level document's response may have made its request through another RequestServer
-//     client than the one that the document's host makes the document's requests through: the document can go to
-//     another process, and a process makes requests for a site through that site's RequestServer only once it hosts a
-//     document of that site. That client then has no connection to the document's origin, and makes one only once
-//     the document's parser finds a subresource, after the response's connection was ready all along. So the host
-//     connects ahead while the document's body streams in. It is also told whether the origin multiplexes requests,
-//     which its client would otherwise only learn from a response of its own, holding back requests until then.
+// NB: A top-level navigation's request goes through the RequestServer of the site of the URL that the navigation
+//     started at, whose clients share their connections. After a redirect to another site, the document's host makes
+//     its requests through the RequestServer of that site, which has no connection to the document's origin, and would
+//     make one only once the document's parser finds a subresource. So the host connects ahead while the document's
+//     body streams in, which costs nothing if there is a connection already. It is also told whether the origin
+//     multiplexes requests, which its client would otherwise only learn from a response of its own, holding back
+//     requests until then.
 static void connect_ahead_for_requests_of_document(WebContentPage& host, NavigationLoader const& loader, URL::URL const& url)
 {
     if (!url.scheme().is_one_of("http"sv, "https"sv))

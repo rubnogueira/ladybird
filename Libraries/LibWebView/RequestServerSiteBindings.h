@@ -58,6 +58,10 @@ public:
     // Binds the process to every site that another process is bound to, as for a worker that process starts.
     void bind_sites_of(RequestServerSiteBindings const&);
 
+    // Connects the process to the RequestServer of the top-level site of a top-level navigation that the UI process
+    // authorized the process to fetch the response of, so that the navigation's request goes through it.
+    ErrorOr<void> connect_for_navigation_to(Utf16String const& top_level_site);
+
     // Whether the client may use the cookies of top_level_site's partition for a request for url.
     bool may_use_cookies_under(int client_id, Utf16String const& top_level_site, URL::URL const& url) const;
 

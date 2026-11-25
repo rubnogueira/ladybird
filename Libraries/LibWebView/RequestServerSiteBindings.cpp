@@ -81,6 +81,22 @@ void RequestServerSiteBindings::bind_sites_of(RequestServerSiteBindings const& o
         bind(site);
 }
 
+// NB: The document that a top-level navigation creates makes its requests through the RequestServer of its site, and
+//     the clients of a RequestServer share their connections. If the navigation's own request went through another
+//     RequestServer, the document's first subresources would wait for a connection of their own while the one that
+//     fetched the document sits idle. A process may already ask for this client while it fetches the navigation's
+//     response, see WebContentClient::did_lose_request_server_connection().
+ErrorOr<void> RequestServerSiteBindings::connect_for_navigation_to(Utf16String const& top_level_site)
+{
+    // NB: connect() connects the process to its other servers once it connects.
+    if (!m_session || !m_client_id.has_value())
+        return {};
+
+    if (m_site_client_ids.contains(top_level_site))
+        return {};
+    return connect_to_site(top_level_site);
+}
+
 bool RequestServerSiteBindings::may_use_cookies_under(int client_id, Utf16String const& top_level_site, URL::URL const& url) const
 {
     // A client of a site's RequestServer makes requests under that site alone.
