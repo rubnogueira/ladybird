@@ -2148,6 +2148,57 @@ enum class AuthenticationHandled {
     Yes,
 };
 
+// AD-HOC: Tell the server how urgent a response is with the Priority header of RFC 9218, like other engines do. Over a
+//         connection that multiplexes requests, the server can then send what the document needs to render first, such
+//         as its style sheets and fonts, instead of sharing the connection between all of the responses. RequestServer
+//         orders the requests that wait for a connection to an HTTP/1.x origin by it too.
+static void append_priority_header(Infrastructure::Request& request)
+{
+    if (request.header_list()->contains("Priority"sv))
+        return;
+
+    using Destination = Infrastructure::Request::Destination;
+    auto destination = request.destination();
+    int urgency = [&] {
+        if (!destination.has_value())
+            return 1;
+        switch (*destination) {
+        case Destination::Document:
+        case Destination::Frame:
+        case Destination::IFrame:
+        case Destination::Font:
+            return 0;
+        case Destination::Style:
+            return request.render_blocking() ? 0 : 2;
+        case Destination::Script:
+        case Destination::Worker:
+        case Destination::SharedWorker:
+        case Destination::ServiceWorker:
+        case Destination::JSON:
+        case Destination::XSLT:
+            return 1;
+        case Destination::Image:
+            return 2;
+        case Destination::Audio:
+        case Destination::Video:
+        case Destination::Track:
+        case Destination::Embed:
+        case Destination::Object:
+            return 3;
+        default:
+            return 4;
+        }
+    }();
+    if (request.priority() == Infrastructure::Request::Priority::High)
+        urgency = max(urgency - 1, 0);
+    else if (request.priority() == Infrastructure::Request::Priority::Low)
+        urgency = min(urgency + 1, 7);
+
+    // Responses that are of use as they come in are incremental.
+    auto incremental = destination.has_value() && first_is_one_of(*destination, Destination::Document, Destination::Frame, Destination::IFrame, Destination::Image, Destination::Audio, Destination::Video);
+    request.header_list()->append({ "Priority"sv, incremental ? ByteString::formatted("u={}, i", urgency) : ByteString::formatted("u={}", urgency) });
+}
+
 // https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch
 static void process_http_network_or_cache_response(JS::Object& global_object, Infrastructure::FetchParams const& fetch_params, NonnullRefPtr<Infrastructure::Request> http_request, NonnullRefPtr<Infrastructure::Response> response, GC::Ref<PendingResponse> returned_pending_response, IsAuthenticationFetch is_authentication_fetch, IsNewConnectionFetch is_new_connection_fetch, HTTP::Cookie::IncludeCredentials include_credentials, AuthenticationHandled authentication_handled = AuthenticationHandled::No)
 {
@@ -2561,6 +2612,8 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
             // 2. Append (`User-Agent`, userAgent) to httpRequest’s header list.
             http_request->header_list()->append({ "User-Agent"sv, move(user_agent) });
         }
+
+        append_priority_header(*http_request);
 
         // 16. If httpRequest’s cache mode is "default" and httpRequest’s header list contains `If-Modified-Since`,
         //     `If-None-Match`, `If-Unmodified-Since`, `If-Match`, or `If-Range`, then set httpRequest’s cache mode to
