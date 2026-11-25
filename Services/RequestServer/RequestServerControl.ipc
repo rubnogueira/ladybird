@@ -14,6 +14,11 @@ endpoint RequestServerControl
     // right away, without waiting for this process to start up: the client's messages wait in the connection until then.
     connect_client(IPC::TransportHandle handle, int client_id, ::RequestServer::IsPrivate is_private, ::RequestServer::SiteBinding site_binding) =|
 
+    // A spare RequestServer starts up without a site, so that it is up before a site needs it. It connects no clients
+    // until the UI process assigns it a site. It then opens the site's disk cache and locks itself down for the site, as
+    // it would have if it had been launched for it.
+    assign_site(Utf16String top_level_site, ByteString cache_path, ByteString http_disk_cache_mode) =|
+
     // Lets a bound client make requests for documents of frame_site under a top-level document of top_level_site. This
     // is synchronous, so the binding is in place before the UI process lets the client's process host such a document.
     bind_client_to_site(int client_id, Utf16String top_level_site, Optional<Utf16String> frame_site) => ()

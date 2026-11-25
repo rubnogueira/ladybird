@@ -22,6 +22,7 @@
 #include <LibRequests/RequestControlClient.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/Options.h>
 #include <RequestServer/SiteBinding.h>
 
 namespace WebView {
@@ -73,7 +74,7 @@ struct RequestServerClientConnection;
 // Manages RequestServers per browsing session and top-level site, plus one with no site for the UI process
 // and requests under no site. Each site's server only makes and caches requests for that site's partitions;
 // its sandbox confines the cache to that site's directory.
-class WEBVIEW_API RequestServerManager {
+class WEBVIEW_API RequestServerManager : public Weakable<RequestServerManager> {
 public:
     AK_ALLOC_WITH_KMALLOC;
 
@@ -109,6 +110,11 @@ public:
 
     bool uses_site_request_servers() const { return m_maximum_site_instances > 0; }
 
+    // Whether a spare RequestServer is kept up for the next site of the default session to need one. Tests go without
+    // one unless they ask for it, so that they don't wait on a process they never use.
+    void set_keeps_spare_process(bool);
+    bool has_spare_process() const { return m_spare_control_client; }
+
     // The process of the client is about to exit for good, such as for a discarded tab. If no other client of its
     // RequestServer is left then, nothing is likely to need that server soon, so it is retired right away.
     void retire_without_delay_once_disconnected(int client_id);
@@ -117,6 +123,8 @@ private:
     ErrorOr<NonnullRefPtr<RequestServerInstance>> launch(NonnullRefPtr<BrowsingSession>, Optional<Utf16String> site);
     ErrorOr<void> launch_process(RequestServerInstance&);
     void did_lose_process(RequestServerInstance&);
+    void launch_spare_process_later();
+    RefPtr<Requests::RequestControlClient> take_spare_process_for(RequestServerInstance const&, HTTPDiskCacheMode);
     void client_disconnected(RequestServerInstance&, int client_id);
     void retire(RequestServerInstance&);
     void retire_idle_instances();
@@ -141,6 +149,11 @@ private:
 
     Vector<NonnullRefPtr<RequestServerInstance>> m_instances;
     size_t m_maximum_site_instances { 0 };
+
+    RefPtr<Requests::RequestControlClient> m_spare_control_client;
+    u64 m_spare_child_id { 0 };
+    bool m_keeps_spare_process { false };
+    bool m_has_queued_spare_launch { false };
 
     // Only the UI process has this. It names the cache directories of sites, see cache_path_for_site().
     ByteBuffer m_site_cache_key;

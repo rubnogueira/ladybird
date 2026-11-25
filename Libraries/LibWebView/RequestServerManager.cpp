@@ -55,6 +55,7 @@ RequestServerManager& RequestServerManager::the()
 
 RequestServerManager::RequestServerManager()
     : m_maximum_site_instances(Application::request_server_options().maximum_site_request_servers)
+    , m_keeps_spare_process(uses_site_request_servers() && Application::web_content_options().is_test_mode == IsTestMode::No)
 {
     if (!uses_site_request_servers())
         return;
@@ -137,7 +138,11 @@ ErrorOr<void> RequestServerManager::launch_process(RequestServerInstance& instan
     auto is_private = instance.session().is_private();
     auto keeps_disk_cache = is_private == IsPrivate::No && (instance.site().has_value() || !uses_site_request_servers());
     auto disk_cache_mode = keeps_disk_cache ? Application::request_server_options().http_disk_cache_mode : HTTPDiskCacheMode::Disabled;
-    auto control_client = TRY(launch_request_server_process(instance.cache_path(), instance.site(), is_private, disk_cache_mode));
+    auto control_client = take_spare_process_for(instance, disk_cache_mode);
+    if (!control_client)
+        control_client = TRY(launch_request_server_process(instance.cache_path(), instance.site(), is_private, disk_cache_mode));
+    if (&instance.session() == &Application::default_session())
+        launch_spare_process_later();
 
     auto weak_instance = instance.make_weak_ptr();
     control_client->on_client_disconnected = [weak_instance](int client_id) {
@@ -170,6 +175,54 @@ ErrorOr<void> RequestServerManager::launch_process(RequestServerInstance& instan
     instance.m_ui_client = move(ui_client);
 
     return {};
+}
+
+void RequestServerManager::set_keeps_spare_process(bool keeps_spare_process)
+{
+    m_keeps_spare_process = keeps_spare_process && uses_site_request_servers();
+    if (!m_keeps_spare_process)
+        m_spare_control_client = nullptr;
+}
+
+// NB: A new RequestServer takes ~65 ms to start up, and a site's first request would wait for it, as the request of a
+//     top-level navigation to a new site does. A spare is up by the time a site needs it.
+void RequestServerManager::launch_spare_process_later()
+{
+    if (!m_keeps_spare_process || m_spare_control_client || m_has_queued_spare_launch)
+        return;
+    m_has_queued_spare_launch = true;
+
+    Core::deferred_invoke([weak_this = make_weak_ptr()] {
+        auto* self = weak_this.ptr();
+        if (!self)
+            return;
+        self->m_has_queued_spare_launch = false;
+        if (!self->m_keeps_spare_process || self->m_spare_control_client)
+            return;
+
+        auto spare = launch_spare_request_server_process();
+        if (spare.is_error()) {
+            dbgln("Unable to launch a spare RequestServer: {}", spare.error());
+            return;
+        }
+        self->m_spare_control_client = move(spare.value().control_client);
+        self->m_spare_child_id = spare.value().child_id;
+    });
+}
+
+RefPtr<Requests::RequestControlClient> RequestServerManager::take_spare_process_for(RequestServerInstance const& instance, HTTPDiskCacheMode disk_cache_mode)
+{
+    // NB: A spare belongs to the default session, and serves a site.
+    if (!m_spare_control_client || !instance.site().has_value() || &instance.session() != &Application::default_session())
+        return nullptr;
+
+    auto control_client = m_spare_control_client.release_nonnull();
+    if (!control_client->is_open())
+        return nullptr;
+
+    RequestServerProcess spare { .control_client = move(control_client), .child_id = exchange(m_spare_child_id, 0) };
+    assign_site_to_spare_request_server(spare, instance.cache_path(), *instance.site(), disk_cache_mode);
+    return move(spare.control_client);
 }
 
 ErrorOr<RequestServerClientConnection> RequestServerManager::connect_new_client(RequestServerInstance& instance, BrowsingSession& session, RequestServer::SiteBinding site_binding)
@@ -335,6 +388,8 @@ void RequestServerManager::disk_cache_settings_changed()
     auto settings = Application::settings().disk_cache_settings();
     for (auto& instance : m_instances)
         instance->control_client().async_set_disk_cache_settings(settings);
+    if (m_spare_control_client)
+        m_spare_control_client->async_set_disk_cache_settings(settings);
 
     evict_least_recently_used_cache_entries_if_needed();
 }
@@ -343,6 +398,8 @@ void RequestServerManager::dns_settings_changed()
 {
     for (auto& instance : m_instances)
         apply_dns_settings(instance->control_client());
+    if (m_spare_control_client)
+        apply_dns_settings(*m_spare_control_client);
 }
 
 ByteString RequestServerManager::sites_directory() const

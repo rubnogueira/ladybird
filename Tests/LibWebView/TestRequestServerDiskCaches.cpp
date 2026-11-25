@@ -6,6 +6,7 @@
 
 #include "HeadlessTest.h"
 #include <AK/LexicalPath.h>
+#include <LibCore/EventLoop.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibTest/TestCase.h>
 #include <LibWebView/Application.h>
@@ -71,4 +72,32 @@ TEST_CASE(site_cache_directories_cannot_be_named_without_the_key)
     WebView::RequestServerManager new_manager;
     EXPECT(!FileSystem::exists(cache_path.string()));
     EXPECT(FileSystem::exists(sites_directory.parent().append("SiteCacheKey"sv).string()));
+}
+
+// A spare RequestServer starts up ahead of the site it is then assigned, and opens that site's cache once it is.
+TEST_CASE(a_spare_request_server_takes_on_the_next_site)
+{
+    Test::HeadlessTestEnvironment environment { "TestRequestServerDiskCaches"sv };
+    auto app = TRY_OR_FAIL(environment.create_application());
+
+    auto& manager = WebView::Application::request_server_manager();
+    auto& normal_session = WebView::Application::default_session();
+    manager.set_keeps_spare_process(true);
+
+    // Launching a RequestServer of the default session sees to a spare.
+    (void)TRY_OR_FAIL(manager.instance_for_site(normal_session, "https://first.example"_utf16));
+    Core::EventLoop::current().spin_until([&] { return manager.has_spare_process(); });
+
+    auto site_server = TRY_OR_FAIL(manager.instance_for_site(normal_session, "https://second.example"_utf16));
+    EXPECT(!manager.has_spare_process());
+    (void)site_server->ui_client().send_sync<Messages::RequestServer::GetClientId>();
+    EXPECT(FileSystem::is_directory(LexicalPath::join(site_server->cache_path(), "Cache"sv).string()));
+
+    // A private session's site never gets the default session's spare.
+    Core::EventLoop::current().spin_until([&] { return manager.has_spare_process(); });
+    auto private_session = WebView::Application::session_for_new_view(WebView::IsPrivate::Yes);
+    auto private_site_server = TRY_OR_FAIL(manager.instance_for_site(*private_session, "https://private.example"_utf16));
+    EXPECT(manager.has_spare_process());
+    (void)private_site_server->ui_client().send_sync<Messages::RequestServer::GetClientId>();
+    EXPECT(!FileSystem::exists(private_site_server->cache_path()));
 }

@@ -34,6 +34,9 @@ def crash_helper(webdriver_pid, process_name):
             arguments = shlex.split(command)
             # A helper's own children, such as its file broker, carry the helper's command line but are not the helper.
             if arguments and Path(arguments[0]).name == process_name:
+                # A spare RequestServer waits for a site to serve, and has none on a page with no site.
+                if "--spare" in arguments:
+                    continue
                 assert "--crash-report-fd" in arguments, f"{process_name} has no capture descriptor"
                 assert "--disable-sandbox" not in arguments, f"{process_name} is not sandboxed"
                 targets.append(pid)

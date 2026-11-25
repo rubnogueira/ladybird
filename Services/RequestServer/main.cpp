@@ -55,6 +55,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     bool wait_for_debugger = false;
     bool disable_sandbox = false;
     bool enable_test_mode = false;
+    bool spare = false;
 
     int crash_report_fd = -1;
     StringView stats_log_directory;
@@ -67,6 +68,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.add_option(resource_map_path, "Path to JSON file mapping URLs to local files", "resource-map", 0, "path");
     args_parser.add_option(cache_path, "Path to the profile cache", "cache-path", 0, "path");
     args_parser.add_option(top_level_site, "The top-level site this RequestServer serves", "site", 0, "site");
+    args_parser.add_option(spare, "Start up without a site, and wait for the browser to assign one", "spare");
     args_parser.add_option(wait_for_debugger, "Wait for debugger", "wait-for-debugger");
     args_parser.add_option(disable_sandbox, "Disable process sandboxing", "disable-sandbox");
     args_parser.add_option(enable_test_mode, "Enable test mode", "test-mode");
@@ -115,36 +117,53 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
     Optional<HTTP::DiskCache> disk_cache;
 
-    if (http_disk_cache_mode != "disabled"sv) {
-        auto mode = TRY([&]() -> ErrorOr<HTTP::DiskCache::Mode> {
-            if (http_disk_cache_mode == "enabled"sv)
-                return HTTP::DiskCache::Mode::Normal;
-            if (http_disk_cache_mode == "testing"sv)
-                return HTTP::DiskCache::Mode::Testing;
-            return Error::from_string_literal("Unrecognized disk cache mode");
-        }());
+    auto set_up_for_site = [&](StringView cache_path, StringView http_disk_cache_mode, Optional<Utf16String> top_level_site) -> ErrorOr<void> {
+        if (http_disk_cache_mode != "disabled"sv) {
+            auto mode = TRY([&]() -> ErrorOr<HTTP::DiskCache::Mode> {
+                if (http_disk_cache_mode == "enabled"sv)
+                    return HTTP::DiskCache::Mode::Normal;
+                if (http_disk_cache_mode == "testing"sv)
+                    return HTTP::DiskCache::Mode::Testing;
+                return Error::from_string_literal("Unrecognized disk cache mode");
+            }());
 
-        if (auto cache = HTTP::DiskCache::create(mode, LexicalPath { cache_path }); cache.is_error())
-            warnln("Unable to create disk cache: {}", cache.error());
-        else
-            disk_cache = cache.release_value();
-    }
+            if (auto cache = HTTP::DiskCache::create(mode, LexicalPath { cache_path }); cache.is_error())
+                warnln("Unable to create disk cache: {}", cache.error());
+            else
+                disk_cache = cache.release_value();
+        }
 
-    // Alternative services are no longer persisted, so this only holds history.
-    if (!cache_path.is_empty())
-        (void)FileSystem::remove(LexicalPath::join(cache_path, "alt-svc-cache.txt"sv).string(), FileSystem::RecursionMode::Disallowed);
+        // Alternative services are no longer persisted, so this only holds history.
+        if (!cache_path.is_empty())
+            (void)FileSystem::remove(LexicalPath::join(cache_path, "alt-svc-cache.txt"sv).string(), FileSystem::RecursionMode::Disallowed);
 
-    if (!top_level_site.is_empty())
-        RequestServer::set_process_top_level_site(Utf16String::from_utf8(top_level_site));
+        if (top_level_site.has_value())
+            RequestServer::set_process_top_level_site(top_level_site.release_value());
+        return {};
+    };
 
-    TRY(RequestServer::initialize_libcurl());
-
-    if (!disable_sandbox) {
+    auto apply_sandbox = [&]() -> ErrorOr<void> {
+        if (disable_sandbox)
+            return {};
         Optional<StringView> disk_cache_directory;
         if (disk_cache.has_value())
             disk_cache_directory = disk_cache->cache_directory().string();
-        TRY(RequestServer::apply_sandbox(mach_server_name, certificates, disk_cache_directory));
+        return RequestServer::apply_sandbox(mach_server_name, certificates, disk_cache_directory);
+    };
+
+    // NB: A spare does what it can without a site ahead of time, and the rest once it is assigned one, see
+    //     ControlConnectionFromClient::assign_site().
+    if (!spare) {
+        Optional<Utf16String> site;
+        if (!top_level_site.is_empty())
+            site = Utf16String::from_utf8(top_level_site);
+        TRY(set_up_for_site(cache_path, http_disk_cache_mode, move(site)));
     }
+
+    TRY(RequestServer::initialize_libcurl());
+
+    if (!spare)
+        TRY(apply_sandbox());
 
     // Connections are stored on the stack to ensure they are destroyed before static destruction begins. This prevents
     // crashes from notifiers trying to unregister from already-destroyed thread data during process exit.
@@ -156,6 +175,16 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         connections,
         request_transfer_leases,
         disk_cache));
+
+    if (spare) {
+        client->await_site_assignment([&](Utf16String const& site, ByteString const& site_cache_path, ByteString const& site_http_disk_cache_mode) -> ErrorOr<Optional<HTTP::DiskCache&>> {
+            TRY(set_up_for_site(site_cache_path, site_http_disk_cache_mode, site));
+            TRY(apply_sandbox());
+            if (!disk_cache.has_value())
+                return OptionalNone {};
+            return Optional<HTTP::DiskCache&> { *disk_cache };
+        });
+    }
 
     if (stats_log)
         stats_log->start_sampling([&](JsonObject& values) {

@@ -23,7 +23,6 @@ ControlConnectionFromClient::ControlConnectionFromClient(NonnullOwnPtr<IPC::Tran
     : IPC::ConnectionFromClient<RequestServerControlClientEndpoint, RequestServerControlEndpoint>(*this, move(transport), 0)
     , m_connections(connections)
     , m_request_transfer_leases(request_transfer_leases)
-    , m_disk_cache(disk_cache)
     , m_resolver(Resolver::default_resolver())
 {
     VERIFY(s_control_connection == nullptr);
@@ -33,19 +32,56 @@ ControlConnectionFromClient::ControlConnectionFromClient(NonnullOwnPtr<IPC::Tran
     Resolver::resolve_system_names_remotely();
 #endif
 
-    if (m_disk_cache.has_value()) {
-        // Coalesce the size changes of a burst of cache writes into one report.
-        m_disk_cache_size_report_timer = Core::Timer::create_single_shot(disk_cache_size_report_delay, [this] {
-            async_disk_cache_size_changed(m_disk_cache->estimated_size());
-        });
-        m_disk_cache->set_on_estimated_size_change([this] {
-            if (!m_disk_cache_size_report_timer->is_active())
-                m_disk_cache_size_report_timer->start();
-        });
+    if (disk_cache.has_value())
+        attach_disk_cache(*disk_cache);
+}
 
-        // The cache may have been on disk before this process started.
-        m_disk_cache_size_report_timer->start();
+void ControlConnectionFromClient::attach_disk_cache(HTTP::DiskCache& disk_cache)
+{
+    VERIFY(!m_disk_cache.has_value());
+    m_disk_cache = disk_cache;
+    if (m_disk_cache_settings.has_value())
+        m_disk_cache->set_maximum_disk_cache_size(m_disk_cache_settings->maximum_size);
+
+    // Coalesce the size changes of a burst of cache writes into one report.
+    m_disk_cache_size_report_timer = Core::Timer::create_single_shot(disk_cache_size_report_delay, [this] {
+        async_disk_cache_size_changed(m_disk_cache->estimated_size());
+    });
+    m_disk_cache->set_on_estimated_size_change([this] {
+        if (!m_disk_cache_size_report_timer->is_active())
+            m_disk_cache_size_report_timer->start();
+    });
+
+    // The cache may have been on disk before this process started.
+    m_disk_cache_size_report_timer->start();
+}
+
+void ControlConnectionFromClient::await_site_assignment(SiteAssignment site_assignment)
+{
+    m_site_assignment = move(site_assignment);
+    m_awaiting_site = true;
+}
+
+void ControlConnectionFromClient::assign_site(Utf16String top_level_site, ByteString cache_path, ByteString http_disk_cache_mode)
+{
+    if (!m_site_assignment) {
+        did_misbehave("assign_site: not a spare RequestServer, or assigned a site already");
+        return;
     }
+
+    auto site_assignment = move(m_site_assignment);
+    auto disk_cache = site_assignment(top_level_site, cache_path, http_disk_cache_mode);
+    if (disk_cache.is_error()) {
+        // NB: This process stays unable to connect clients, so it never serves a site that it could not lock itself
+        //     down for.
+        warnln("Unable to set the RequestServer up for {}: {}", top_level_site, disk_cache.error());
+        Core::EventLoop::current().quit(1);
+        return;
+    }
+
+    if (auto cache = disk_cache.release_value(); cache.has_value())
+        attach_disk_cache(*cache);
+    m_awaiting_site = false;
 }
 
 ControlConnectionFromClient::~ControlConnectionFromClient()
@@ -99,6 +135,10 @@ void ControlConnectionFromClient::connect_client(IPC::TransportHandle handle, in
         did_misbehave("connect_client: invalid or live client ID");
         return;
     }
+    if (m_awaiting_site) {
+        did_misbehave("connect_client: no site assigned yet");
+        return;
+    }
 
     auto transport = handle.create_transport();
     if (transport.is_error()) {
@@ -129,6 +169,7 @@ void ControlConnectionFromClient::designate_request_adopter(u64 designation_id, 
 
 void ControlConnectionFromClient::set_disk_cache_settings(HTTP::DiskCacheSettings disk_cache_settings)
 {
+    m_disk_cache_settings = disk_cache_settings;
     if (m_disk_cache.has_value())
         m_disk_cache->set_maximum_disk_cache_size(disk_cache_settings.maximum_size);
 }

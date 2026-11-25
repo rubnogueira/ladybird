@@ -34,6 +34,10 @@ public:
 
     static Optional<ControlConnectionFromClient&> the();
 
+    // Sets up the process for the site that the UI process assigns a spare RequestServer, and returns its disk cache.
+    using SiteAssignment = Function<ErrorOr<Optional<HTTP::DiskCache&>>(Utf16String const& top_level_site, ByteString const& cache_path, ByteString const& http_disk_cache_mode)>;
+    void await_site_assignment(SiteAssignment);
+
     // Resolves a name through the system resolver of the process that launched RequestServer.
     void resolve_host_with_system_resolver(ByteString const& host, Core::Socket::AddressFamily, Function<void(DNS::Resolver::SystemResolution)>);
 
@@ -41,6 +45,7 @@ private:
     ControlConnectionFromClient(NonnullOwnPtr<IPC::Transport>, RequestServer::ConnectionFromClient::ConnectionMap&, RequestServer::ConnectionFromClient::RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
 
     virtual void connect_client(IPC::TransportHandle, int client_id, IsPrivate, SiteBinding) override;
+    virtual void assign_site(Utf16String top_level_site, ByteString cache_path, ByteString http_disk_cache_mode) override;
     virtual void bind_client_to_site(int client_id, Utf16String top_level_site, Optional<Utf16String> frame_site) override;
 
     virtual void designate_request_adopter(u64 designation_id, int source_client_id, u64 source_request_id, int adopter_client_id) override;
@@ -67,10 +72,14 @@ private:
     virtual void resolved_host_with_system_resolver(u64 resolution_id, Optional<Vector<ByteString>> addresses) override;
 
     void push_network_usage();
+    void attach_disk_cache(HTTP::DiskCache&);
 
     RequestServer::ConnectionFromClient::ConnectionMap& m_connections;
     RequestServer::ConnectionFromClient::RequestTransferLeaseMap& m_request_transfer_leases;
     Optional<HTTP::DiskCache&> m_disk_cache;
+    Optional<HTTP::DiskCacheSettings> m_disk_cache_settings;
+    SiteAssignment m_site_assignment;
+    bool m_awaiting_site { false };
 
     NonnullRefPtr<Resolver> m_resolver;
 

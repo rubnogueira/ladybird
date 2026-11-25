@@ -596,39 +596,28 @@ void apply_dns_settings(Requests::RequestControlClient& client)
         });
 }
 
-ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_process(ByteString const& cache_path, Optional<Utf16String> const& site, IsPrivate is_private, HTTPDiskCacheMode http_disk_cache_mode)
+static StringView http_disk_cache_mode_name(HTTPDiskCacheMode http_disk_cache_mode)
+{
+    switch (http_disk_cache_mode) {
+    case HTTPDiskCacheMode::Disabled:
+        return "disabled"sv;
+    case HTTPDiskCacheMode::Enabled:
+        return "enabled"sv;
+    case HTTPDiskCacheMode::Testing:
+        return "testing"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static ErrorOr<RequestServerProcess> launch_request_server_process_with(Vector<ByteString> arguments, Optional<Utf16String> const& site, IsPrivate is_private)
 {
     auto const& browser_options = Application::browser_options();
     auto const& request_server_options = Application::request_server_options();
-
-    Vector<ByteString> arguments;
-
-    arguments.append("--cache-path"sv);
-    arguments.append(cache_path);
-
-    if (site.has_value()) {
-        arguments.append("--site"sv);
-        arguments.append(site->to_byte_string());
-    }
 
     if (browser_options.disable_sandbox == DisableSandbox::Yes)
         arguments.append("--disable-sandbox"sv);
     for (auto const& certificate : request_server_options.certificates)
         arguments.append(ByteString::formatted("--certificate={}", certificate));
-
-    arguments.append("--http-disk-cache-mode"sv);
-
-    switch (http_disk_cache_mode) {
-    case HTTPDiskCacheMode::Disabled:
-        arguments.append("disabled"sv);
-        break;
-    case HTTPDiskCacheMode::Enabled:
-        arguments.append("enabled"sv);
-        break;
-    case HTTPDiskCacheMode::Testing:
-        arguments.append("testing"sv);
-        break;
-    }
 
     if (auto server = mach_server_name(); server.has_value()) {
         arguments.append("--mach-server-name"sv);
@@ -642,7 +631,7 @@ ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_pro
         arguments.append("--test-mode"sv);
 
     RefPtr<Requests::RequestControlClient> client;
-    TRY(launch_helper_process("RequestServer"sv, move(arguments), is_private, [&](Core::ProcessSpawnOptions const& options, bool capture_output) -> ErrorOr<Process> {
+    auto identity = TRY(launch_helper_process("RequestServer"sv, move(arguments), is_private, [&](Core::ProcessSpawnOptions const& options, bool capture_output) -> ErrorOr<Process> {
         auto [process, new_client] = TRY(Process::spawn<Requests::RequestControlClient>(ProcessType::RequestServer, options, capture_output));
         if (site.has_value())
             process.set_site_url(URL::Parser::basic_parse(*site));
@@ -655,7 +644,43 @@ ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_pro
     if (!Application::settings().dns_settings().has<SystemDNS>())
         apply_dns_settings(*client);
 
-    return client.release_nonnull();
+    return RequestServerProcess { .control_client = client.release_nonnull(), .child_id = identity.child_id };
+}
+
+ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_process(ByteString const& cache_path, Optional<Utf16String> const& site, IsPrivate is_private, HTTPDiskCacheMode http_disk_cache_mode)
+{
+    Vector<ByteString> arguments;
+
+    arguments.append("--cache-path"sv);
+    arguments.append(cache_path);
+
+    if (site.has_value()) {
+        arguments.append("--site"sv);
+        arguments.append(site->to_byte_string());
+    }
+
+    arguments.append("--http-disk-cache-mode"sv);
+    arguments.append(http_disk_cache_mode_name(http_disk_cache_mode));
+
+    auto process = TRY(launch_request_server_process_with(move(arguments), site, is_private));
+    return move(process.control_client);
+}
+
+ErrorOr<RequestServerProcess> launch_spare_request_server_process()
+{
+    auto process = TRY(launch_request_server_process_with({ "--spare"sv }, {}, IsPrivate::No));
+    if (auto child = Application::process_manager().find_child(process.child_id); child.has_value())
+        child->set_title("(spare)"_utf16);
+    return process;
+}
+
+void assign_site_to_spare_request_server(RequestServerProcess const& spare, ByteString const& cache_path, Utf16String const& site, HTTPDiskCacheMode http_disk_cache_mode)
+{
+    spare.control_client->async_assign_site(site, cache_path, ByteString { http_disk_cache_mode_name(http_disk_cache_mode) });
+    if (auto child = Application::process_manager().find_child(spare.child_id); child.has_value()) {
+        child->set_title({});
+        child->set_site_url(URL::Parser::basic_parse(site));
+    }
 }
 
 ErrorOr<RequestServerClientConnection> connect_new_request_server_client(BrowsingSession& session, RequestServer::SiteBinding site_binding)

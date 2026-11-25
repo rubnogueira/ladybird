@@ -57,6 +57,16 @@ WEBVIEW_API void shut_down_video_decoder_servers();
 WEBVIEW_API ErrorOr<NonnullRefPtr<WebView::CompositorClient>> launch_compositor_process(ByteString const& platform_features);
 // Serves the given site's partitions, or all partitions if site is empty.
 WEBVIEW_API ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_process(ByteString const& cache_path, Optional<Utf16String> const& site, IsPrivate, HTTPDiskCacheMode);
+
+struct RequestServerProcess {
+    NonnullRefPtr<Requests::RequestControlClient> control_client;
+    u64 child_id { 0 };
+};
+
+// Launches a RequestServer of a normal session that serves no site until it is assigned one, so that it is up by then.
+WEBVIEW_API ErrorOr<RequestServerProcess> launch_spare_request_server_process();
+// Has a spare RequestServer serve the given site's partitions, as launch_request_server_process() would have.
+WEBVIEW_API void assign_site_to_spare_request_server(RequestServerProcess const&, ByteString const& cache_path, Utf16String const& site, HTTPDiskCacheMode);
 WEBVIEW_API void apply_dns_settings(Requests::RequestControlClient&);
 
 // Launches an ImageDecoder, which is listed with the given site, or with the given process if it serves no site.
