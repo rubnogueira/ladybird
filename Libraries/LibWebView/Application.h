@@ -492,6 +492,7 @@ private:
     void reevaluate_platform_features();
     ErrorOr<void> launch_compositor_process();
     void bring_up_compositor_process();
+    void finish_compositor_bring_up();
 #if defined(AK_OS_WINDOWS)
     bool is_window_of_compositor_process(u64 window_handle);
 #endif
@@ -674,6 +675,8 @@ private:
     OwnPtr<RequestServerManager> m_request_server_manager;
     OwnPtr<ImageDecoderManager> m_image_decoder_manager;
     RefPtr<CompositorClient> m_compositor_client;
+    // A Compositor that was launched, and has yet to say that it is up, see launch_compositor_process().
+    RefPtr<CompositorClient> m_starting_compositor_client;
     u64 m_compositor_generation { 0 };
     RefPtr<CompositorPresentationClient> m_compositor_presentation_client;
     u64 m_compositor_presentation_id { 0 };

@@ -106,6 +106,8 @@ void PageHost::compositor_process_reconnected()
         m_compositor_host->register_animated_images_with_new_compositor();
     for (auto& [_, page] : m_pages)
         page->compositor_process_reconnected();
+    if (m_compositor_host)
+        m_compositor_host->run_work_awaiting_compositor();
 }
 
 void PageHost::invalidate_user_style()

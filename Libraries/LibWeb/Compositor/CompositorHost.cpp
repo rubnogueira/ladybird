@@ -272,6 +272,40 @@ AnimatedImageState CompositorHost::animated_image_state_for_testing(u64 frame_id
     return {};
 }
 
+bool CompositorHost::is_connected_to_compositor() const
+{
+    auto* connection = compositor_connection();
+    return connection && connection->can_send_message_to_compositor();
+}
+
+void CompositorHost::when_connected_to_compositor(Function<void()> callback)
+{
+    if (is_connected_to_compositor()) {
+        callback();
+        return;
+    }
+    m_work_awaiting_compositor.append(move(callback));
+}
+
+void CompositorHost::run_work_awaiting_compositor()
+{
+    if (!is_connected_to_compositor())
+        return;
+    auto work = move(m_work_awaiting_compositor);
+    for (auto& callback : work)
+        callback();
+}
+
+bool CompositorContextHandle::is_connected_to_compositor() const
+{
+    return m_host.is_connected_to_compositor();
+}
+
+void CompositorContextHandle::when_connected_to_compositor(Function<void()> callback)
+{
+    m_host.when_connected_to_compositor(move(callback));
+}
+
 void CompositorHost::register_animated_images_with_new_compositor()
 {
     auto* connection = compositor_connection();

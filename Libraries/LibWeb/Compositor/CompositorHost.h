@@ -108,6 +108,11 @@ public:
     // Sends the canvas commands a frame may sample ahead of it, and answers whether the compositor can be reached.
     bool ready_for_frame();
 
+    // Whether a compositor can be reached now, and runs the callback once one can, see
+    // CompositorHost::when_connected_to_compositor().
+    bool is_connected_to_compositor() const;
+    void when_connected_to_compositor(Function<void()>);
+
 private:
     friend class CompositorHost;
 
@@ -161,6 +166,13 @@ public:
     // A new compositor process has heard of none of the images.
     void register_animated_images_with_new_compositor();
 
+    // Runs the callback once a compositor can be reached, right away if one can. Work that needs an answer from the
+    // compositor, like a screenshot, waits for one that is starting up, or that replaces one that went away, this way
+    // instead of failing. The work runs once the new compositor knows the contexts and has been told what they show.
+    bool is_connected_to_compositor() const;
+    void when_connected_to_compositor(Function<void()>);
+    void run_work_awaiting_compositor();
+
     // Returns whether a compositor heard of the sink, which one that connects later will not have.
     [[nodiscard]] bool add_video_sink(Media::VideoSinkHandle, NonnullRefPtr<Compositing::VideoFramePresentationPage>);
     void remove_video_sink(Media::VideoSinkHandle);
@@ -195,6 +207,7 @@ private:
     friend class CompositorContextHandle;
 
     HashMap<u64, AnimatedImageRegistration> m_animated_images;
+    Vector<Function<void()>> m_work_awaiting_compositor;
 
     void* m_canvas_2d_stream { nullptr };
 };

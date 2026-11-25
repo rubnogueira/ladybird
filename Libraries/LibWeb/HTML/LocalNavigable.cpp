@@ -7495,6 +7495,18 @@ void LocalNavigable::render_screenshot(NonnullRefPtr<Gfx::Bitmap> target, PaintC
         return;
     }
 
+    // NB: A compositor that is starting up, or that replaces one that went away, takes the screenshot once it is up.
+    if (!compositor_context().is_connected_to_compositor()) {
+        compositor_context().when_connected_to_compositor([weak_this = GC::Weak { *this }, target = move(target), paint_config, callback = move(callback)]() mutable {
+            if (!weak_this || weak_this->has_been_destroyed() || !weak_this->has_compositor_context()) {
+                callback(Compositor::ScreenshotResult::Failed);
+                return;
+            }
+            weak_this->render_screenshot(move(target), paint_config, move(callback));
+        });
+        return;
+    }
+
     // The compositor composes the display lists that the processes hosting the subtree's remote descendants last
     // published as well, so it has those processes paint their documents first, as this process does its own below.
     auto has_remote_descendant = any_of(active_document_inclusive_descendant_navigables(), [](auto const& navigable) {

@@ -2206,22 +2206,45 @@ PlatformFeatures::ProcessFeatures Application::platform_features_for(FeatureProc
     return m_platform_feature_decisions->features_for(process);
 }
 
+// NB: A new Compositor takes ~140 ms to start up, mostly to set up its GPU backend. The UI process used to wait for it in
+//     the requests that bring it up, and so did everything that the UI process does, like starting the navigation that
+//     a link opened in the browser asks for. So the Compositor is only brought up once it says that it is up, which it
+//     does by reporting its GPU device. Pages opened meanwhile are attached to it then, as after a crash.
 ErrorOr<void> Application::launch_compositor_process()
 {
     VERIFY(!m_compositor_client);
+    VERIFY(!m_starting_compositor_client);
     auto features = m_platform_feature_decisions->features_for(FeatureProcess::Compositor);
     m_compositor_launched_features = features.to_byte_string();
     auto gpu_painting_enabled = features.is_enabled(PlatformFeatures::Feature::GpuPainting);
     if (exchange(m_compositor_gpu_painting_enabled, gpu_painting_enabled) != gpu_painting_enabled)
         on_compositor_gpu_painting_changed();
-    m_compositor_client = TRY(WebView::launch_compositor_process(m_compositor_launched_features));
-    ++m_compositor_generation;
-    m_compositor_client->on_death = [this]() {
+    auto compositor_client = TRY(WebView::launch_compositor_process(m_compositor_launched_features));
+    m_starting_compositor_client = compositor_client;
+
+    auto weak_client = compositor_client->make_weak_ptr<CompositorClient>();
+    compositor_client->on_death = [this, weak_client]() {
+        if (weak_client && weak_client.ptr() == m_starting_compositor_client.ptr())
+            m_starting_compositor_client = nullptr;
         handle_compositor_process_death();
     };
-    m_compositor_client->on_gpu_device_identity_reported = [this](Optional<Gfx::GpuDeviceIdentity> identity) {
+    compositor_client->on_gpu_device_identity_reported = [this, weak_client](Optional<Gfx::GpuDeviceIdentity> identity) {
+        if (weak_client && weak_client.ptr() == m_starting_compositor_client.ptr())
+            finish_compositor_bring_up();
         compositor_reported_gpu_device_identity(move(identity));
     };
+    return {};
+}
+
+void Application::finish_compositor_bring_up()
+{
+    ScopeGuard clear_recovery_flag = [this] {
+        if (m_compositor_recovery_state == CompositorRecoveryState::Recovering)
+            m_compositor_recovery_state = CompositorRecoveryState::Idle;
+    };
+
+    m_compositor_client = move(m_starting_compositor_client);
+    ++m_compositor_generation;
 
     update_compositor_high_dynamic_range_surfaces();
 
@@ -2231,10 +2254,12 @@ ErrorOr<void> Application::launch_compositor_process()
     gpu_presentation_adapter_luid = Gfx::default_dxgi_adapter_luid();
 #endif
     auto presentation_or_error = m_compositor_client->try_create_presentation_connection(!platform_reports_scroll_momentum(), platform_scrolls_elastically(), gpu_presentation_adapter_luid);
-    if (presentation_or_error.is_error())
-        return Error::from_string_literal("Compositor process disconnected while creating presentation connection");
+    if (presentation_or_error.is_error()) {
+        // NB: The Compositor is gone, and its death brings up another.
+        return;
+    }
     auto presentation = presentation_or_error.release_value();
-    auto transport = TRY(presentation.take_handle().create_transport());
+    auto transport = MUST(presentation.take_handle().create_transport());
     m_compositor_presentation_client = adopt_ref(*new CompositorPresentationClient(move(transport)));
     m_compositor_presentation_id = presentation.presentation_id();
     m_compositor_presentation_client->async_set_scrollbar_track_press_jumps(platform_scrollbar_track_press_jumps());
@@ -2249,7 +2274,30 @@ ErrorOr<void> Application::launch_compositor_process()
             m_compositor_client->shutdown();
     };
 
-    return {};
+    Vector<NonnullRefPtr<WebContentClient>> clients;
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        if (client.is_open())
+            clients.append(NonnullRefPtr { client });
+        return IterationDecision::Continue;
+    });
+
+    for (auto& client : clients) {
+        if (auto result = client->reconnect_to_compositor_process({}); result.is_error()) {
+            warnln("Unable to reconnect WebContent process {} to Compositor: {}", client->pid(), result.error());
+            VERIFY_NOT_REACHED();
+        }
+    }
+    for (auto& client : clients) {
+        if (auto result = client->recreate_compositor_contexts({}); result.is_error()) {
+            warnln("Unable to recreate Compositor contexts for WebContent process {}: {}", client->pid(), result.error());
+            VERIFY_NOT_REACHED();
+        }
+    }
+    for (auto& client : clients)
+        client->replay_compositor_view_state_after_reconnect({});
+    for (auto& client : clients)
+        client->notify_compositor_process_reconnected({});
+    WorkerAgentManager::the().notify_compositor_process_reconnected(m_compositor_generation);
 }
 
 void Application::compositor_reported_gpu_device_identity(Optional<Gfx::GpuDeviceIdentity> identity)
@@ -2376,10 +2424,8 @@ void Application::relaunch_compositor_process(bool counts_as_crash)
     }
 
     VERIFY(m_compositor_recovery_state == CompositorRecoveryState::Idle);
+    // NB: The recovery lasts until the new Compositor is brought up, see finish_compositor_bring_up().
     m_compositor_recovery_state = CompositorRecoveryState::Recovering;
-    ScopeGuard clear_recovery_flag = [this] {
-        m_compositor_recovery_state = CompositorRecoveryState::Idle;
-    };
     bring_up_compositor_process();
 }
 
@@ -2392,31 +2438,6 @@ void Application::bring_up_compositor_process()
         warnln("Unable to launch Compositor process: {}", result.error());
         VERIFY_NOT_REACHED();
     }
-
-    Vector<NonnullRefPtr<WebContentClient>> clients;
-    WebContentClient::for_each_client([&](WebContentClient& client) {
-        if (client.is_open())
-            clients.append(NonnullRefPtr { client });
-        return IterationDecision::Continue;
-    });
-
-    for (auto& client : clients) {
-        if (auto result = client->reconnect_to_compositor_process({}); result.is_error()) {
-            warnln("Unable to reconnect WebContent process {} to Compositor: {}", client->pid(), result.error());
-            VERIFY_NOT_REACHED();
-        }
-    }
-    for (auto& client : clients) {
-        if (auto result = client->recreate_compositor_contexts({}); result.is_error()) {
-            warnln("Unable to recreate Compositor contexts for WebContent process {}: {}", client->pid(), result.error());
-            VERIFY_NOT_REACHED();
-        }
-    }
-    for (auto& client : clients)
-        client->replay_compositor_view_state_after_reconnect({});
-    for (auto& client : clients)
-        client->notify_compositor_process_reconnected({});
-    WorkerAgentManager::the().notify_compositor_process_reconnected(m_compositor_generation);
 }
 
 ErrorOr<void> Application::launch_request_server()
