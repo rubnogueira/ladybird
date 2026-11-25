@@ -49,6 +49,7 @@ class BuildInformationTests(unittest.TestCase):
             )
             self.assertRegex(build_information.generate(source, build, "Clang 21.0"), r"LADYBIRD_COMMIT.+unknown")
 
+            # NB: The user's own git hooks and commit signing would apply to the commits made here, and might refuse them.
             def git(*arguments):
                 return subprocess.check_output(
                     [
@@ -59,6 +60,10 @@ class BuildInformationTests(unittest.TestCase):
                         "user.name=Test",
                         "-c",
                         "user.email=test@example.invalid",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "commit.gpgSign=false",
                         *arguments,
                     ],
                     stderr=subprocess.DEVNULL,
