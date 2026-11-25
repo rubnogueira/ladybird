@@ -393,8 +393,11 @@ void Tab::initialize(Optional<u64> hub_view_id)
     };
 
     view().on_favicon_change = [this](auto const& bitmap) {
+        // A new document has no favicon until it loads one, which it does after its load event, as other browsers do.
+        // Until then, like them, the tab shows the favicon that the page had when it was last visited, if any.
         if (!bitmap.has_value()) {
-            m_favicon = {};
+            auto entry = m_window->history_entry_for_url(view().url());
+            m_favicon = entry.has_value() && entry->favicon_png.has_value() ? favicon_from_png(entry->favicon_png->bytes(), TAB_ICON_SIZE) : QIcon {};
             update_tab_icon();
             return;
         }
