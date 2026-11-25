@@ -50,6 +50,9 @@ struct AIAFetch {
 // Diagnostics hook shared with the control connection; only does anything under REQUESTSERVER_WIRE_DEBUG.
 void note_event_tick(StringView label);
 
+// What the connection pool knows an origin by: its scheme, host and port.
+ByteString connection_pool_key(URL::URL const&);
+
 // A libcurl multi handle, driven by the event loop. Its transfers share one connection pool.
 class CurlMulti : public RefCounted<CurlMulti> {
     AK_MAKE_NONCOPYABLE(CurlMulti);
@@ -65,6 +68,22 @@ public:
     // ConnectionFromClient::has_warm_connection().
     HashMap<ByteString, bool> origins_multiplexing;
     HashMap<ByteString, MonotonicTime> warm_connections;
+
+    // The connections of the pool to an origin known to speak HTTP/1.x, which serve one transfer at a time, see
+    // Request::start_transfer(). The counts are what the pool's transfers found out, and may be off when a server
+    // closes a connection: that only costs a transfer the connection it would otherwise have made.
+    static constexpr size_t maximum_host_connections = 6;
+    struct HTTP1Origin {
+        size_t busy_connections { 0 };
+        size_t idle_connections { 0 };
+        size_t pending_connections { 0 };
+        Vector<Request*> waiting_transfers;
+    };
+    HashMap<ByteString, HTTP1Origin> http1_origins;
+
+    // An idle connection to the origin, or none if the connection that became ready is gone, goes to the transfer that
+    // waited longest for one, if any.
+    void offer_http1_connection(ByteString const& origin_key, bool connection_is_idle);
 
 private:
     CurlMulti();
@@ -124,6 +143,10 @@ public:
     Optional<bool> origin_multiplexes(URL::URL const&) const;
 
     void fetch_aia_intermediate(Badge<Request>, ByteString const& url, u64 for_request_id);
+
+    CurlMulti& fetch_curl() { return *m_fetch_curl; }
+    // Makes a connection to the origin of the URL for a transfer that waits for one, see Request::start_transfer().
+    void connect_for_waiting_http1_transfer(Badge<Request>, URL::URL const&);
 
 private:
     ConnectionFromClient(NonnullOwnPtr<IPC::Transport>, int client_id, IsPrivate, SiteBinding, ConnectionMap&, RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
@@ -186,6 +209,8 @@ private:
 
     HashMap<u64, NonnullOwnPtr<Request>> m_active_requests;
     HashMap<u64, NonnullOwnPtr<Request>> m_active_revalidation_requests;
+    HashMap<u64, NonnullOwnPtr<Request>> m_http1_connects;
+    u64 m_next_http1_connect_id { 0 };
     void look_up_aia_host(ByteString const& url, ByteString const& fetch_url, ByteString const& host, u16 port, Optional<HTTP::Proxy>);
     void start_aia_fetch(ByteString const& url, ByteString const& fetch_url, Optional<HTTP::Proxy>, Optional<ByteString> resolve_entry);
     void abandon_aia_lookup(ByteString const& url);

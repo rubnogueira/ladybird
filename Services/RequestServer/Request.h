@@ -67,13 +67,18 @@ public:
         Optional<u32> address_selection_hint,
         bool notify_on_cache_miss);
 
+    enum class ConnectsForWaitingHTTP1Transfer {
+        No,
+        Yes,
+    };
     static NonnullOwnPtr<Request> connect(
         u64 request_id,
         ConnectionFromClient& client,
         void* curl_multi,
         Resolver& resolver,
         URL::URL url,
-        CacheLevel cache_level);
+        CacheLevel cache_level,
+        ConnectsForWaitingHTTP1Transfer = ConnectsForWaitingHTTP1Transfer::No);
 
     static NonnullOwnPtr<Request> revalidate(
         u64 request_id,
@@ -107,6 +112,13 @@ public:
     static Vector<Requests::NetworkUsage> take_network_usage();
     static void add_network_usage(Requests::NetworkUsage const&);
     void set_performance_origin(int client_id, u64 page_id);
+
+    bool connects_for_waiting_http1_transfer() const { return m_connects_for_waiting_http1_transfer; }
+
+    // The urgency of the response, from 0 for the most urgent to 7, as the request's Priority header gives it.
+    // https://www.rfc-editor.org/rfc/rfc9218#name-urgency
+    u8 urgency() const;
+    void start_waiting_transfer(Badge<CurlMulti>);
 
     // When the client made the request, on the monotonic clock that all processes share, which its timing info counts
     // from. The request may have waited for this process to start up, or to read its messages, until then.
@@ -344,6 +356,22 @@ private:
     void* m_curl_multi_handle { nullptr };
     void* m_curl_easy_handle { nullptr };
     bool m_curl_easy_handle_is_in_multi { false };
+
+    // How this request takes part in the late binding of HTTP/1.x connections, see start_transfer().
+    enum class HTTP1ConnectionUse : u8 {
+        None,
+        WaitsForConnection,
+        HoldsConnection,
+        MakesConnection,
+    };
+    void start_transfer();
+    void add_transfer_to_multi();
+    void hold_http1_connection_and_add_transfer();
+    void release_http1_connection(bool connection_is_idle);
+    HTTP1ConnectionUse m_http1_connection_use { HTTP1ConnectionUse::None };
+    bool m_connects_for_waiting_http1_transfer { false };
+    RefPtr<CurlMulti> m_http1_pool;
+    ByteString m_http1_origin_key;
     Vector<curl_slist*> m_curl_string_lists;
 
     RefPtr<AIACollector> m_aia_collector;

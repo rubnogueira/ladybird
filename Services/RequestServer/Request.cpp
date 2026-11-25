@@ -458,10 +458,18 @@ NonnullOwnPtr<Request> Request::connect(
     void* curl_multi,
     Resolver& resolver,
     URL::URL url,
-    CacheLevel cache_level)
+    CacheLevel cache_level,
+    ConnectsForWaitingHTTP1Transfer connects_for_waiting_http1_transfer)
 {
     auto request = adopt_own(*new Request { request_id, client, curl_multi, resolver, move(url) });
     request->m_connect_cache_level = cache_level;
+    if (connects_for_waiting_http1_transfer == ConnectsForWaitingHTTP1Transfer::Yes) {
+        request->m_connects_for_waiting_http1_transfer = true;
+        request->m_http1_connection_use = HTTP1ConnectionUse::MakesConnection;
+        request->m_http1_pool = client.fetch_curl();
+        request->m_http1_origin_key = connection_pool_key(request->m_url);
+        ++request->m_http1_pool->http1_origins.ensure(request->m_http1_origin_key).pending_connections;
+    }
     request->transition_to_state(State::DNSLookup);
     return request;
 }
@@ -589,6 +597,8 @@ NonnullOwnPtr<Request> Request::import(
 
 Request::~Request()
 {
+    release_http1_connection(false);
+
     if constexpr (REQUESTSERVER_DEBUG) {
         if (!m_response_buffer.is_eof())
             dbgln("Warning: Request destroyed with buffered data (it's likely that the client disappeared or the request was cancelled)");
@@ -735,6 +745,8 @@ static constexpr size_t max_aia_fetches_per_request = 5;
 void Request::notify_fetch_complete(Badge<ConnectionFromClient>, int result_code)
 {
     mark_lifecycle_event(this, &WireStats::complete_observed_at);
+    // NB: libcurl keeps the connection of a transfer that completed for the next one.
+    release_http1_connection(result_code == CURLE_OK);
     handle_fetch_complete(result_code);
 }
 
@@ -1677,6 +1689,9 @@ void Request::handle_fetch_state()
 
     if (curl_headers) {
         set_option(CURLOPT_HTTPHEADER, curl_headers);
+
+        // NB: Servers that schedule HTTP/2 streams by the priorities of RFC 7540 see the urgency in the stream's weight.
+        set_option(CURLOPT_STREAM_WEIGHT, static_cast<long>(256 - 32 * urgency()));
         m_curl_string_lists.append(curl_headers);
     }
 
@@ -1726,6 +1741,101 @@ void Request::handle_fetch_state()
         }
     }
 
+    start_transfer();
+}
+
+// NB: An HTTP/1.x connection serves one transfer at a time. libcurl binds a transfer that finds no idle connection to a
+//     new connection as soon as it starts making one, even if a busy connection to the origin becomes idle long before
+//     the new one is ready: a new connection costs a TCP and a TLS handshake, while the transfers that hold the others
+//     are often nearly done. So a transfer to an origin known to speak HTTP/1.x that would need a new connection while
+//     other transfers to the origin hold theirs waits for whichever connection is ready first, one of those or a new
+//     one that is made for it, as in other engines. It waits no longer than its own connection would have taken.
+void Request::start_transfer()
+{
+    auto& pool = m_client->fetch_curl();
+    auto may_wait_for_connection = m_type == RequestType::Fetch && m_curl_multi_handle == pool.handle() && !m_proxy.has_value()
+        && !m_alternative_service.has_value() && m_url.scheme().is_one_of("http"sv, "https"sv) && m_client->origin_multiplexes(m_url) == false;
+    if (!may_wait_for_connection) {
+        add_transfer_to_multi();
+        return;
+    }
+
+    m_http1_pool = pool;
+    m_http1_origin_key = connection_pool_key(m_url);
+    auto& origin = pool.http1_origins.ensure(m_http1_origin_key);
+
+    auto connections = origin.busy_connections + origin.idle_connections + origin.pending_connections;
+    if (origin.idle_connections == 0 && origin.busy_connections > 0 && connections < CurlMulti::maximum_host_connections) {
+        m_http1_connection_use = HTTP1ConnectionUse::WaitsForConnection;
+        // NB: The most urgent transfer gets the next connection, and the one that waited longest of those.
+        auto urgency = this->urgency();
+        auto position = origin.waiting_transfers.find_first_index_if([&](auto* waiting) { return waiting->urgency() > urgency; });
+        origin.waiting_transfers.insert(position.value_or(origin.waiting_transfers.size()), this);
+        m_client->connect_for_waiting_http1_transfer({}, m_url);
+        return;
+    }
+
+    if (origin.idle_connections > 0)
+        --origin.idle_connections;
+    hold_http1_connection_and_add_transfer();
+}
+
+u8 Request::urgency() const
+{
+    static constexpr u8 default_urgency = 3;
+    auto priority = m_request_headers->get("Priority"sv);
+    if (!priority.has_value())
+        return default_urgency;
+    for (auto parameter : priority->split_view(',')) {
+        parameter = parameter.trim_whitespace();
+        if (parameter.length() == 3 && parameter.starts_with("u="sv) && is_ascii_digit(parameter[2]) && parameter[2] <= '7')
+            return parameter[2] - '0';
+    }
+    return default_urgency;
+}
+
+void Request::start_waiting_transfer(Badge<CurlMulti>)
+{
+    VERIFY(m_http1_connection_use == HTTP1ConnectionUse::WaitsForConnection);
+    hold_http1_connection_and_add_transfer();
+}
+
+void Request::hold_http1_connection_and_add_transfer()
+{
+    m_http1_connection_use = HTTP1ConnectionUse::HoldsConnection;
+    ++m_http1_pool->http1_origins.ensure(m_http1_origin_key).busy_connections;
+    add_transfer_to_multi();
+}
+
+void Request::release_http1_connection(bool connection_is_idle)
+{
+    if (!m_http1_pool)
+        return;
+    auto pool = m_http1_pool.release_nonnull();
+    auto use = exchange(m_http1_connection_use, HTTP1ConnectionUse::None);
+
+    auto origin = pool->http1_origins.find(m_http1_origin_key);
+    if (origin == pool->http1_origins.end())
+        return;
+
+    switch (use) {
+    case HTTP1ConnectionUse::None:
+        return;
+    case HTTP1ConnectionUse::WaitsForConnection:
+        origin->value.waiting_transfers.remove_first_matching([&](auto* request) { return request == this; });
+        return;
+    case HTTP1ConnectionUse::HoldsConnection:
+        --origin->value.busy_connections;
+        break;
+    case HTTP1ConnectionUse::MakesConnection:
+        --origin->value.pending_connections;
+        break;
+    }
+    pool->offer_http1_connection(m_http1_origin_key, connection_is_idle);
+}
+
+void Request::add_transfer_to_multi()
+{
     mark_lifecycle_event(this, &WireStats::curl_added_at);
     m_transfer_started_at = MonotonicTime::now();
     auto result = curl_multi_add_handle(m_curl_multi_handle, m_curl_easy_handle);
@@ -2186,6 +2296,8 @@ ErrorOr<void> Request::detach_curl_handle_from_multi()
         return Error::from_string_literal("Failed to remove curl easy handle from multi handle");
 
     m_curl_easy_handle_is_in_multi = false;
+    // NB: An HTTP/1.x connection that was taken off a transfer before it completed is closed.
+    release_http1_connection(false);
     return {};
 }
 

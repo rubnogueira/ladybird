@@ -274,9 +274,40 @@ static constexpr AK::Duration s_warm_connection_window = AK::Duration::from_seco
 static constexpr size_t s_maximum_warm_connections = 256;
 static constexpr size_t s_maximum_origins_multiplexing = 1024;
 
-static ByteString warm_connection_key(URL::URL const& url)
+ByteString connection_pool_key(URL::URL const& url)
 {
     return ByteString::formatted("{}://{}:{}", url.scheme(), url.serialized_host(), url.port_or_default());
+}
+
+static ByteString warm_connection_key(URL::URL const& url)
+{
+    return connection_pool_key(url);
+}
+
+void CurlMulti::offer_http1_connection(ByteString const& origin_key, bool connection_is_idle)
+{
+    auto origin = http1_origins.find(origin_key);
+    if (origin == http1_origins.end())
+        return;
+
+    // NB: Each waiting transfer had a connection made for it. One that failed leaves a transfer to make its own.
+    auto& waiting_transfers = origin->value.waiting_transfers;
+    if (!waiting_transfers.is_empty() && (connection_is_idle || waiting_transfers.size() > origin->value.pending_connections)) {
+        auto* request = waiting_transfers.take_first();
+        request->start_waiting_transfer({});
+        return;
+    }
+    if (connection_is_idle)
+        ++origin->value.idle_connections;
+    if (origin->value.busy_connections == 0 && origin->value.idle_connections == 0 && origin->value.pending_connections == 0)
+        http1_origins.remove(origin);
+}
+
+void ConnectionFromClient::connect_for_waiting_http1_transfer(Badge<Request>, URL::URL const& url)
+{
+    auto request_id = m_next_http1_connect_id++;
+    auto request = Request::connect(request_id, *this, m_fetch_curl->handle(), m_resolver, url, CacheLevel::CreateConnection, Request::ConnectsForWaitingHTTP1Transfer::Yes);
+    m_http1_connects.set(request_id, move(request));
 }
 
 void ConnectionFromClient::note_warm_connection(Badge<Request>, URL::URL const& url)
@@ -320,10 +351,12 @@ void ConnectionFromClient::request_complete(Badge<Request>, Request const& reque
     if (request.has_transfer_lease())
         return;
 
-    Core::deferred_invoke([weak_self = make_weak_ptr<ConnectionFromClient>(), request_id = request.request_id(), type = request.type()] {
+    Core::deferred_invoke([weak_self = make_weak_ptr<ConnectionFromClient>(), request_id = request.request_id(), type = request.type(), connects_for_waiting_http1_transfer = request.connects_for_waiting_http1_transfer()] {
         if (auto self = weak_self.strong_ref()) {
             if (type == RequestType::BackgroundRevalidation)
                 self->m_active_revalidation_requests.remove(request_id);
+            else if (connects_for_waiting_http1_transfer)
+                self->m_http1_connects.remove(request_id);
             else
                 self->m_active_requests.remove(request_id);
         }
@@ -335,6 +368,7 @@ void ConnectionFromClient::cancel_owned_work()
 {
     m_active_requests.clear();
     m_active_revalidation_requests.clear();
+    m_http1_connects.clear();
     m_pending_websockets.clear();
     m_websocket_cookie_requests.clear();
     m_websockets.clear();
