@@ -64,6 +64,16 @@ QIcon favicon_from_png(ReadonlyBytes favicon_png, int logical_size)
     QPixmap pixmap;
     if (!pixmap.loadFromData(favicon_png.data(), static_cast<uint>(favicon_png.size()), "PNG"))
         return {};
+    return favicon_from_pixmap(pixmap, logical_size);
+}
+
+// NB: QIcon never scales a pixmap up, so a favicon smaller than the device pixels it is shown in, such as a 20 px one
+//     in a 16 pt tab on a 2x display, would be stretched by the painter without smoothing. Each device pixel ratio gets
+//     a smoothly scaled pixmap of its own instead, whose corners are rounded at that size.
+QIcon favicon_from_pixmap(QPixmap const& pixmap, int logical_size)
+{
+    if (pixmap.isNull())
+        return {};
 
     QIcon icon;
     for (auto device_pixel_ratio : ICON_DEVICE_PIXEL_RATIOS) {

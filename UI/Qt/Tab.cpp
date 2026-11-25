@@ -406,7 +406,7 @@ void Tab::initialize(Optional<u64> hub_view_id)
         if (qpixmap.isNull())
             return;
 
-        m_favicon = favicon_with_rounded_corners(qpixmap);
+        m_favicon = favicon_from_pixmap(qpixmap, TAB_ICON_SIZE);
         update_tab_icon();
     };
 

@@ -77,6 +77,7 @@ constexpr inline int TOOLBAR_ICON_SIZE = 18;
 QIcon load_icon_from_uri(StringView);
 QPixmap favicon_with_rounded_corners(QPixmap const&);
 QIcon favicon_from_png(ReadonlyBytes, int logical_size);
+QIcon favicon_from_pixmap(QPixmap const&, int logical_size);
 QIcon create_chrome_icon(ChromeIcon, QPalette const&, ChromeStyle::WindowActivity = ChromeStyle::WindowActivity::Active, int logical_size = CHROME_ICON_CANVAS_SIZE);
 // The site settings icon with its two knobs moved toward each other's place, by a travel from 0 to 1.
 QIcon create_site_settings_icon(QPalette const&, qreal knob_travel);
