@@ -218,6 +218,13 @@ static NonnullRefPtr<CurlMulti> create_fetch_multi()
     auto multi = CurlMulti::create();
     auto result = curl_multi_setopt(multi->handle(), CURLMOPT_MAX_HOST_CONNECTIONS, 6L);
     VERIFY(result == CURLM_OK);
+
+    // NB: By default, libcurl keeps up to four idle connections for each transfer in progress, and closes the one idle
+    //     the longest once there are more. A page that pauses between bursts of requests has few transfers in
+    //     progress, so the connections that it is about to use again, such as the one to its own origin, were closed,
+    //     and their next request made a new one. Keep as many as other engines do, until they idle for too long.
+    result = curl_multi_setopt(multi->handle(), CURLMOPT_MAXCONNECTS, 256L);
+    VERIFY(result == CURLM_OK);
     return multi;
 }
 
